@@ -94,6 +94,7 @@ class LLMService:
         recommendations: dict[str, list[dict[str, Any]]],
         gamechanger_limit: Optional[int] = None,
         gamechangers: Optional[Iterable[str]] = None,
+        invalid_card_names: Optional[Iterable[str]] = None,
     ) -> Optional[dict[str, Any]]:
         if not self._enabled or self._client is None:
             return None
@@ -105,6 +106,7 @@ class LLMService:
             recommendations,
             gamechanger_limit,
             gamechangers,
+            invalid_card_names,
         )
         return await self._generate_json(prompt)
 
@@ -118,10 +120,17 @@ class LLMService:
         change_request: str,
         gamechanger_limit: Optional[int] = None,
         gamechangers: Optional[Iterable[str]] = None,
+        invalid_card_names: Optional[Iterable[str]] = None,
     ) -> Optional[dict[str, Any]]:
         if not self._enabled or self._client is None:
             return None
         gc_block = _gamechanger_block(gamechanger_limit, gamechangers)
+
+        invalid_cards = ''
+        if invalid_card_names:
+            invalid_block = "\n".join(f"- {name}" for name in invalid_card_names)
+            invalid_cards += f"\nThe following cards are invalid and need to be replaced:\n{invalid_block}\n\n"        
+
         prompt = (
             f"You are revising an existing Magic: The Gathering Commander deck.\n"
             f"Commander: {commander.get('name')} "
@@ -129,6 +138,7 @@ class LLMService:
             f"Bracket {bracket} - {bracket_description}\n"
             f"Original user concept: {user_prompt or '(none)'}\n"
             f"User change request: {change_request}\n\n"
+            f"{invalid_cards}"
             f"{gc_block}"
             f"Current decklist (99 cards, JSON):\n{json.dumps(previous_decklist)}\n\n"
             f"Produce a revised 99-card decklist applying the change request while "
@@ -145,6 +155,7 @@ class LLMService:
         recommendations: dict[str, list[dict[str, Any]]],
         gamechanger_limit: Optional[int] = None,
         gamechangers: Optional[Iterable[str]] = None,
+        invalid_card_names: Optional[Iterable[str]] = None,
     ) -> str:
         ci = "".join(commander.get("color_identity") or []) or "C"
         rec_lines: list[str] = []
@@ -155,6 +166,10 @@ class LLMService:
         recs_block = "\n".join(rec_lines) if rec_lines else "(no EDHREC data available)"
         concept = user_prompt or "(none provided - use the commander's strengths)"
         gc_block = _gamechanger_block(gamechanger_limit, gamechangers)
+        invalid_cards = ''
+        if invalid_card_names:
+            invalid_block = "\n".join(f"- {name}" for name in invalid_card_names)
+            invalid_cards += f"\nThe following cards are invalid and need to be replaced:\n{invalid_block}\n\n"
         return (
             f"You are an expert Magic: The Gathering Commander deck builder.\n\n"
             f"Commander: {commander.get('name')}\n"
@@ -165,6 +180,7 @@ class LLMService:
             f"{gc_block}"
             f"User's deck concept / prompt (PRIMARY DIRECTION - build around this):\n"
             f"{concept}\n\n"
+            f"{invalid_cards}"
             f"EDHREC recommendation pool (reference candidates only - substitute "
             f"whenever the user's concept or bracket constraints demand it):\n"
             f"{recs_block}\n\n{_DECK_SCHEMA_INSTRUCTIONS}"

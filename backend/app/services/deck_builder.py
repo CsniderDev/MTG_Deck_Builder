@@ -85,6 +85,23 @@ class DeckBuilder:
                     "retry, or clear the deck concept to use a heuristic build."
                 )
 
+        validation = await self.validate_decklist(
+            llm_result.get("decklist") if llm_result else [], commander_card.get("color_identity", [])
+        )
+
+        invalid_cards = validation[1]
+        if invalid_cards: 
+            llm_result = await self._llm.build_deck(
+                commander=commander_card,
+                bracket=request.bracket,
+                bracket_description=bracket_desc,
+                user_prompt=request.prompt,
+                recommendations=recommendations,
+                gamechanger_limit=limit,
+                gamechangers=GAMECHANGERS,
+                invalid_cards=invalid_cards,
+            )
+
         decklist, explanation, source, notes = self._materialize(
             llm_result, commander_card, recommendations, request.bracket
         )
@@ -100,6 +117,30 @@ class DeckBuilder:
             source=source,
         )
     
+
+    async def validate_decklist(self, llm_generated_list, commander_colors):
+        valid_cards = []
+        invalid_cards = []
+
+        for card_name in llm_generated_list:
+            response = self._scryfall.get(f"https://api.scryfall.com/cards/named?fuzzy={card_name}")
+            if response.status_code == 200:
+                data = response.json()
+
+                # Check Identity
+                card_identity = set(data['color_identity'])
+                if not card_identity.issubset(set(commander_colors)):
+                    invalid_cards.append(f"{card_name} (Color Mismatch)")
+                    continue
+
+                # Check Legality
+                if data['legalities']['commander'] != 'legal':
+                    invalid_cards.append(f"{card_name} (Banned/Illegal)")
+                    continue
+                
+                valid_cards.append(data)
+
+        return valid_cards, invalid_cards
 
     async def revamp(self, request: RevampDeckRequest) -> DeckResponse:
         commander_card = await self._resolve_commander(request.commander)
@@ -127,6 +168,23 @@ class DeckBuilder:
         else:
             decklist, explanation, source, notes = self._materialize(
                 llm_result, commander_card, {}, request.bracket
+            )
+
+        validation = await self.validate_decklist(
+            llm_result.get("decklist") if llm_result else [], commander_card.get("color_identity", [])
+        )
+
+        invalid_cards = validation[1]
+        if invalid_cards: 
+            llm_result = await self._llm.revamp_deck(
+                commander=commander_card,
+                bracket=request.bracket,
+                bracket_description=bracket_desc,
+                user_prompt=request.prompt,
+                recommendations=recommendations,
+                gamechanger_limit=limit,
+                gamechangers=GAMECHANGERS,
+                invalid_cards=invalid_cards,
             )
 
         return DeckResponse(
