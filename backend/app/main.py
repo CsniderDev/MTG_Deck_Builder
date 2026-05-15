@@ -84,3 +84,11 @@ async def autocomplete_cards(
         q, commander_only=commander_only
     )
     return AutocompleteResponse(suggestions=suggestions)
+
+@app.get("/api/banned")
+async def get_banned_list() -> list[str]:
+    return await app.state.scryfall.getBannedList()
+
+@app.get("/api/gamechangers")
+async def get_gamechangers() -> list[str]:
+    return await app.state.scryfall.getGamechangers()

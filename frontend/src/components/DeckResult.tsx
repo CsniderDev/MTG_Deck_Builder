@@ -1,9 +1,10 @@
 import React, { useMemo, useState } from 'react';
-import type { DeckCard, DeckResponse } from '../types';
+import type { DeckResponse, MagicCard } from '../types';
+import MagicCardItem from './MagicCard';
 
 function buildDeckText(deck: DeckResponse): string {
   const lines: string[] = [`1 ${deck.commander.name}`];
-  const grouped = new Map<string, DeckCard[]>();
+  const grouped = new Map<string, MagicCard[]>();
   for (const card of deck.decklist) {
     const cat = card.category || 'Other';
     if (!grouped.has(cat)) grouped.set(cat, []);
@@ -50,7 +51,7 @@ export default function DeckResult({
     setChangeRequest('');
   }
 
-  const grouped = new Map<string, DeckCard[]>();
+  const grouped = new Map<string, MagicCard[]>();
   for (const card of deck.decklist) {
     const cat = card.category || 'Other';
     if (!grouped.has(cat)) grouped.set(cat, []);
@@ -91,8 +92,13 @@ export default function DeckResult({
               <h3>{cat}</h3>
               <ul>
                 {cards.map((card) => (
-                  <li key={card.name}>
-                    <span className="count">{card.count}</span> {card.name}
+                  <li key={card.name} style={{ listStyle: 'none' }}>
+                    <MagicCardItem card={card as MagicCard} />
+
+                    {/* If your MagicCardItem doesn't show the count, add it here or inside the component */}
+                    <div className="card-label">
+                      <span className="count">{card.count}x</span> {card.name}
+                    </div>
                   </li>
                 ))}
               </ul>

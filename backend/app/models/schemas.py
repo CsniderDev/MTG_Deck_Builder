@@ -17,7 +17,7 @@ BRACKET_DESCRIPTIONS: dict[int, str] = {
 }
 
 
-class DeckCard(BaseModel):
+class MagicCard(BaseModel):
     name: str
     count: int = 1
     category: Optional[str] = None
@@ -30,24 +30,28 @@ class BuildDeckRequest(BaseModel):
     commander: str = Field(..., min_length=1, max_length=200)
     bracket: BracketLevel
     prompt: str = Field(default="", max_length=4000)
+    gamechangers: list[str] = []
+    banned_list: list[str] = []
 
 
 class RevampDeckRequest(BaseModel):
     commander: str
     bracket: BracketLevel
     prompt: str = ""
+    gamechangers: list[str] = []
+    banned_list: list[str] = []
     previous_version: int = 1
-    previous_decklist: list[DeckCard]
+    previous_decklist: list[MagicCard]
     change_request: str = Field(..., min_length=1, max_length=4000)
 
 
 class DeckResponse(BaseModel):
     version: int
-    commander: DeckCard
+    commander: MagicCard
     bracket: BracketLevel
     bracket_description: str
     prompt: str
-    decklist: list[DeckCard]
+    decklist: list[MagicCard]
     explanation: str
     notes: list[str] = []
     source: Literal["llm", "heuristic"]

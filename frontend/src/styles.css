@@ -178,3 +178,43 @@ button.secondary { background: var(--accent-2); color: #0a0c12; }
   background: rgba(110, 168, 254, 0.18);
   color: var(--text);
 }
+
+.card-container {
+  position: relative;
+  width: 150px; /* Standard grid size */
+  cursor: pointer;
+  transition: transform 0.2s ease;
+}
+
+.card-container:hover {
+  transform: translateY(-5px); /* Subtle lift effect */
+  z-index: 10;
+}
+
+.card-image {
+  width: 100%;
+  border-radius: 4.75%; /* MTG card corner radius */
+  box-shadow: 0 4px 8px rgba(0,0,0,0.3);
+}
+
+.card-hover-preview {
+  position: absolute;
+  top: -100px; /* Adjust based on your grid layout */
+  left: 110%;  /* Shows to the right of the card */
+  width: 300px;
+  z-index: 100;
+  pointer-events: none; /* Prevents the hover from flickering */
+  animation: fadeIn 0.15s ease-out;
+}
+
+.card-hover-preview img {
+  width: 100%;
+  border-radius: 4.75%;
+  box-shadow: 0 10px 25px rgba(0,0,0,0.5);
+  border: 1px solid #333;
+}
+
+@keyframes fadeIn {
+  from { opacity: 0; transform: scale(0.95); }
+  to { opacity: 1; transform: scale(1); }
+}

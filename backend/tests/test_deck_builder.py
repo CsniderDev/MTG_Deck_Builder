@@ -1,6 +1,6 @@
 import pytest
 
-from app.models.schemas import BuildDeckRequest, DeckCard, RevampDeckRequest
+from app.models.schemas import BuildDeckRequest, MagicCard, RevampDeckRequest
 from app.services.deck_builder import (
     DECK_SIZE,
     DeckBuilder,
@@ -155,7 +155,7 @@ async def test_revamp_increments_version():
         "explanation": "Revised.",
     }
     builder = DeckBuilder(_StubScryfall(), _StubEDHRec(), _StubLLM(payload))
-    prev = [DeckCard(name="Old Card", count=1)]
+    prev = [MagicCard(name="Old Card", count=1)]
     request = RevampDeckRequest(
         commander="Atraxa",
         bracket=3,
@@ -177,7 +177,7 @@ async def test_revamp_without_llm_falls_back_with_note():
         bracket=3,
         prompt="",
         previous_version=1,
-        previous_decklist=[DeckCard(name="X")],
+        previous_decklist=[MagicCard(name="X")],
         change_request="anything",
     )
     result = await builder.revamp(request)

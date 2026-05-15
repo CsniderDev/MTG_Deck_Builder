@@ -1,7 +1,7 @@
 import React, { useEffect, useState } from 'react';
 import DeckForm from './components/DeckForm';
 import DeckResult from './components/DeckResult';
-import { buildDeck, fetchHealth, revampDeck } from './api';
+import { buildDeck, fetchHealth, revampDeck, fetchBannedListAndGamechangers } from './api';
 import type { BuildDeckPayload, DeckResponse, HealthStatus } from './types';
 
 export default function App(): React.ReactElement {
@@ -11,8 +11,31 @@ export default function App(): React.ReactElement {
   const [revamping, setRevamping] = useState<boolean>(false);
   const [error, setError] = useState<string>('');
   const [health, setHealth] = useState<HealthStatus | null>(null);
+  const [bannedList, setBannedList] = useState<string[]>([]);
+  const [gamechangers, setGamechangers] = useState<string[]>([]);
 
   useEffect(() => {
+
+    if (!bannedList?.length || !gamechangers?.length) {
+      fetchBannedListAndGamechangers()
+        .then((data) => {
+          setBannedList(data.banned_list || []);
+          setGamechangers(data.gamechangers || []);
+          localStorage.setItem('mtg_banned_list', JSON.stringify(data.banned_list || []));
+          localStorage.setItem('mtg_gamechangers', JSON.stringify(data.gamechangers || []));
+        })
+        .catch(() => {
+          setBannedList([]);
+          setGamechangers([]);
+        });
+    } else {
+      setBannedList(bannedList);
+      setGamechangers(gamechangers);
+    }
+
+    console.log('gamechangers:', gamechangers);
+    console.log('banned list:', bannedList);
+
     fetchHealth()
       .then(setHealth)
       .catch(() => setHealth({ status: 'unreachable', llm_enabled: false }));
@@ -41,6 +64,8 @@ export default function App(): React.ReactElement {
         commander: formState.commander,
         bracket: formState.bracket,
         prompt: formState.prompt,
+        gamechangers: gamechangers,
+        banned_list: bannedList,
         previous_version: deck.version,
         previous_decklist: deck.decklist,
         change_request: changeRequest,

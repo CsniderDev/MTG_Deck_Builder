@@ -10,11 +10,11 @@ from __future__ import annotations
 import logging
 from typing import Any, Optional
 
-from ..constants import GAMECHANGERS, gamechanger_limit
+from ..constants import gamechanger_limit
 from ..models.schemas import (
     BRACKET_DESCRIPTIONS,
     BuildDeckRequest,
-    DeckCard,
+    MagicCard,
     DeckResponse,
     RevampDeckRequest,
 )
@@ -50,6 +50,8 @@ class DeckBuilder:
         bracket_desc = BRACKET_DESCRIPTIONS[request.bracket]
         limit = gamechanger_limit(request.bracket)
         has_prompt = bool((request.prompt or "").strip())
+        banned_list = set(name.strip().lower() for name in request.banned_list or [])
+        gamechangers = set(name.strip().lower() for name in request.gamechangers or [])
 
         llm_result: Optional[dict[str, Any]] = None
         if has_prompt:
@@ -72,7 +74,8 @@ class DeckBuilder:
                 user_prompt=request.prompt,
                 recommendations=recommendations,
                 gamechanger_limit=limit,
-                gamechangers=GAMECHANGERS,
+                gamechangers=gamechangers,
+                banned_list=banned_list,
             )
             if llm_result is None:
                 logger.warning(
@@ -98,12 +101,13 @@ class DeckBuilder:
                 user_prompt=request.prompt,
                 recommendations=recommendations,
                 gamechanger_limit=limit,
-                gamechangers=GAMECHANGERS,
-                invalid_cards=invalid_cards,
+                gamechangers=gamechangers,
+                banned_list=banned_list,
+                color_identity=commander_card.get("color_identity", []),
             )
 
         decklist, explanation, source, notes = self._materialize(
-            llm_result, commander_card, recommendations, request.bracket
+            llm_result, commander_card, recommendations, request.bracket, request.gamechangers
         )
         return DeckResponse(
             version=1,
@@ -119,26 +123,30 @@ class DeckBuilder:
     
 
     async def validate_decklist(self, llm_generated_list, commander_colors):
+        # 1. Clean the list from the LLM
+        names = [c.get("name") if isinstance(c, dict) else c for c in llm_generated_list]
+        
+        # 2. Batch names into chunks of 75 (Scryfall's limit)
+        # Use your scryfall service to call POST /cards/collection
+        # with {"identifiers": [{"name": n} for n in names]}
+        all_card_data = await self._scryfall.get_collection(names)
+        
         valid_cards = []
         invalid_cards = []
+        commander_identity = set(commander_colors)
 
-        for card_name in llm_generated_list:
-            response = self._scryfall.get(f"https://api.scryfall.com/cards/named?fuzzy={card_name}")
-            if response.status_code == 200:
-                data = response.json()
+        for data in all_card_data:
+            logger.debug("Validating card: %s", data)
+            # Check Legality & Identity locally (No more API calls!)
+            is_legal = data.get('legalities', {}).get('commander') == 'legal'
+            card_identity = set(data.get('color_identity', []))
+            is_color_valid = card_identity.issubset(commander_identity)
 
-                # Check Identity
-                card_identity = set(data['color_identity'])
-                if not card_identity.issubset(set(commander_colors)):
-                    invalid_cards.append(f"{card_name} (Color Mismatch)")
-                    continue
-
-                # Check Legality
-                if data['legalities']['commander'] != 'legal':
-                    invalid_cards.append(f"{card_name} (Banned/Illegal)")
-                    continue
-                
+            if is_legal and is_color_valid:
                 valid_cards.append(data)
+            else:
+                reason = "Banned" if not is_legal else "Color Mismatch"
+                invalid_cards.append(f"{data.get('name')} ({reason})")
 
         return valid_cards, invalid_cards
 
@@ -147,6 +155,9 @@ class DeckBuilder:
         bracket_desc = BRACKET_DESCRIPTIONS[request.bracket]
         limit = gamechanger_limit(request.bracket)
         previous_payload = [card.model_dump() for card in request.previous_decklist]
+        banned_list = set(name.strip().lower() for name in request.banned_list or [])
+        gamechangers = set(name.strip().lower() for name in request.gamechangers or [])
+        color_identity = commander_card.get("color_identity", [])
 
         llm_result = await self._llm.revamp_deck(
             commander=commander_card,
@@ -156,7 +167,9 @@ class DeckBuilder:
             previous_decklist=previous_payload,
             change_request=request.change_request,
             gamechanger_limit=limit,
-            gamechangers=GAMECHANGERS,
+            gamechangers=gamechangers,
+            banned_list=banned_list,
+            color_identity=color_identity,
         )
         if llm_result is None:
             # Without an LLM we cannot meaningfully revamp; rebuild instead.
@@ -183,8 +196,10 @@ class DeckBuilder:
                 user_prompt=request.prompt,
                 recommendations=recommendations,
                 gamechanger_limit=limit,
-                gamechangers=GAMECHANGERS,
-                invalid_cards=invalid_cards,
+                gamechangers=gamechangers,
+                banned_list=banned_list,
+                previous_decklist=previous_payload,
+                change_request=request.change_request,
             )
 
         return DeckResponse(
@@ -219,7 +234,8 @@ class DeckBuilder:
         commander_card: dict[str, Any],
         recommendations: dict[str, list[dict[str, Any]]],
         bracket: int,
-    ) -> tuple[list[DeckCard], str, str, list[str]]:
+        gamechangers: set[str],
+    ) -> tuple[list[MagicCard], str, str, list[str]]:
         notes: list[str] = []
         if llm_result and isinstance(llm_result.get("decklist"), list):
             raw_list = llm_result["decklist"]
@@ -229,20 +245,20 @@ class DeckBuilder:
                 notes.extend(str(n) for n in extra_notes)
             source = "llm"
         else:
-            raw_list = _heuristic_decklist(commander_card, recommendations, bracket)
+            raw_list = _heuristic_decklist(commander_card, recommendations, bracket, gamechangers)
             explanation = _heuristic_explanation(commander_card, recommendations)
             source = "heuristic"
             notes.append(
                 "Built without an LLM - top EDHREC picks plus a basic-land base were used."
             )
 
-        raw_list = _enforce_gamechanger_limit(raw_list, bracket, notes)
+        raw_list = _enforce_gamechanger_limit(raw_list, bracket, notes, gamechangers)
         decklist = _normalize_decklist(raw_list, commander_card, notes)
         return decklist, explanation, source, notes
 
 
-def _to_card(card: dict[str, Any]) -> DeckCard:
-    return DeckCard(
+def _to_card(card: dict[str, Any]) -> MagicCard:
+    return MagicCard(
         name=card.get("name", ""),
         count=1,
         category="Commander",
@@ -260,9 +276,9 @@ def _normalize_decklist(
     raw_list: list[Any],
     commander_card: dict[str, Any],
     notes: list[str],
-) -> list[DeckCard]:
+) -> list[MagicCard]:
     commander_name = (commander_card.get("name") or "").lower()
-    seen: dict[str, DeckCard] = {}
+    seen: dict[str, MagicCard] = {}
     for entry in raw_list:
         if not isinstance(entry, dict):
             continue
@@ -284,7 +300,7 @@ def _normalize_decklist(
             continue
         if not is_basic:
             count = 1
-        seen[key] = DeckCard(name=name, count=count, category=category)
+        seen[key] = MagicCard(name=name, count=count, category=category)
 
     total = sum(card.count for card in seen.values())
     if total > DECK_SIZE:
@@ -297,7 +313,7 @@ def _normalize_decklist(
     return list(seen.values())
 
 
-def _trim_to_size(deck: dict[str, DeckCard], target: int) -> None:
+def _trim_to_size(deck: dict[str, MagicCard], target: int) -> None:
     while sum(c.count for c in deck.values()) > target:
         basic_keys = [k for k, v in deck.items() if v.name in _BASIC_NAMES and v.count > 1]
         if basic_keys:
@@ -312,7 +328,7 @@ def _trim_to_size(deck: dict[str, DeckCard], target: int) -> None:
             break
 
 
-def _pad_with_basics(deck: dict[str, DeckCard], commander_card: dict[str, Any], needed: int) -> None:
+def _pad_with_basics(deck: dict[str, MagicCard], commander_card: dict[str, Any], needed: int) -> None:
     colors = commander_card.get("color_identity") or []
     basics = [_BASIC_BY_COLOR[c] for c in colors if c in _BASIC_BY_COLOR] or ["Wastes"]
     i = 0
@@ -322,13 +338,13 @@ def _pad_with_basics(deck: dict[str, DeckCard], commander_card: dict[str, Any], 
         if key in deck:
             deck[key].count += 1
         else:
-            deck[key] = DeckCard(name=basic, count=1, category="Land")
+            deck[key] = MagicCard(name=basic, count=1, category="Land")
         needed -= 1
         i += 1
 
 
 def _enforce_gamechanger_limit(
-    raw_list: list[Any], bracket: int, notes: list[str]
+    raw_list: list[Any], bracket: int, notes: list[str], gamechangers: set[str]
 ) -> list[Any]:
     limit = gamechanger_limit(bracket)
     if limit is None:
@@ -341,7 +357,7 @@ def _enforce_gamechanger_limit(
             kept.append(entry)
             continue
         name = (entry.get("name") or "").strip()
-        if name in GAMECHANGERS:
+        if name in gamechangers:
             if gc_count >= limit:
                 removed += 1
                 continue
@@ -359,6 +375,7 @@ def _heuristic_decklist(
     commander_card: dict[str, Any],
     recommendations: dict[str, list[dict[str, Any]]],
     bracket: int,
+    gamechangers: set[str],
 ) -> list[dict[str, Any]]:
     picks: list[dict[str, Any]] = []
     seen: set[str] = set()
@@ -372,11 +389,11 @@ def _heuristic_decklist(
             name = card.get("name")
             if not name or name.lower() == commander_name or name.lower() in seen:
                 continue
-            if name in GAMECHANGERS and limit is not None and gc_count >= limit:
+            if name in gamechangers and limit is not None and gc_count >= limit:
                 continue
             picks.append({"name": name, "count": 1, "category": header})
             seen.add(name.lower())
-            if name in GAMECHANGERS:
+            if name in gamechangers:
                 gc_count += 1
             if len(picks) >= target_nonland:
                 break

@@ -276,7 +276,7 @@ Pydantic v2 models used for request/response validation:
 - `BracketLevel = Literal[1, 2, 3, 4, 5]`.
 - `BRACKET_DESCRIPTIONS: dict[int, str]` — human-readable bracket text
   embedded in LLM prompts and returned in responses.
-- `DeckCard` — `name`, `count`, `category`, `scryfall_id`, `mana_cost`,
+- `MagicCard` — `name`, `count`, `category`, `scryfall_id`, `mana_cost`,
   `type_line`.
 - `BuildDeckRequest` — `commander` (1–200 chars), `bracket`, `prompt`
   (≤ 4000 chars).
@@ -378,7 +378,7 @@ Orchestrates the build pipeline. Holds module-level constants `DECK_SIZE = 99`,
 
 Module-level helpers:
 
-- `_to_card(card)` — builds the commander `DeckCard` row.
+- `_to_card(card)` — builds the commander `MagicCard` row.
 - `_normalize_decklist(raw_list, commander_card, notes)` — dedupes by
   lowercased name, enforces singleton for non-basics, drops duplicate
   commander entries, trims excess, and pads with `_pad_with_basics` until
@@ -476,7 +476,7 @@ Source of truth for shared TypeScript interfaces; mirrors the Pydantic
 schema.
 
 - `BracketLevel = 1 | 2 | 3 | 4 | 5`.
-- `DeckCard`, `DeckSource = 'llm' | 'heuristic'`, `DeckResponse`.
+- `MagicCard`, `DeckSource = 'llm' | 'heuristic'`, `DeckResponse`.
 - `BuildDeckPayload`, `RevampDeckPayload extends BuildDeckPayload`.
 - `HealthStatus`, `AutocompleteResponse`.
 

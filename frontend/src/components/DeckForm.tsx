@@ -25,11 +25,15 @@ export default function DeckForm({ onSubmit, loading, initial }: DeckFormProps):
   const [commander, setCommander] = useState<string>(initial?.commander ?? '');
   const [bracket, setBracket] = useState<BracketLevel>(initial?.bracket ?? 2);
   const [prompt, setPrompt] = useState<string>(initial?.prompt ?? '');
+  const [bannedList, setBannedList] = useState<string[]>(initial?.banned_list ?? []);
+  const [gamechangers, setGamechangers] = useState<string[]>(initial?.gamechangers ?? []);
 
   function handleSubmit(event: React.FormEvent<HTMLFormElement>): void {
+    setBannedList(localStorage.getItem('mtg_banned_list') ? JSON.parse(localStorage.getItem('mtg_banned_list') as string) : []);
+    setGamechangers(localStorage.getItem('mtg_gamechangers') ? JSON.parse(localStorage.getItem('mtg_gamechangers') as string) : []);
     event.preventDefault();
     if (!commander.trim()) return;
-    onSubmit({ commander: commander.trim(), bracket, prompt: prompt.trim() });
+    onSubmit({ commander: commander.trim(), bracket, prompt: prompt.trim(), gamechangers, banned_list: bannedList });
   }
 
   return (
