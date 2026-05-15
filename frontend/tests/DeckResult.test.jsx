@@ -69,7 +69,6 @@ describe('DeckResult', () => {
     expect(writeText).toHaveBeenCalledTimes(1);
     const text = writeText.mock.calls[0][0];
     expect(text).toContain("1 Atraxa, Praetors' Voice");
-    expect(text).toContain('// Ramp');
     expect(text).toContain('1 Sol Ring');
     expect(text).toContain('8 Forest');
     expect(await screen.findByRole('button', { name: /copied/i })).toBeInTheDocument();

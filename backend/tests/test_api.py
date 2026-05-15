@@ -17,7 +17,9 @@ ATRAXA = {
     "oracle_text": "Flying, vigilance, deathtouch, lifelink",
     "legalities": {"commander": "legal"},
     "color_identity": ["W", "U", "B", "G"],
+    "colors": ["W", "U", "B", "G"],
     "mana_cost": "{G}{W}{U}{B}",
+    "image_uris": {"normal": "https://img.test/atraxa-normal.jpg"},
 }
 
 
@@ -36,6 +38,28 @@ class _StubScryfall:
         if "atra" in query.lower():
             return ["Atraxa, Praetors' Voice", "Atraxa, Grand Unifier"]
         return []
+
+    async def get_collection(self, names: list[str]) -> list[dict[str, Any]]:
+        return [
+            {
+                "id": f"id-{name.lower().replace(' ', '-')}",
+                "name": name,
+                "type_line": "Artifact",
+                "oracle_text": f"Rules text for {name}",
+                "mana_cost": "{1}",
+                "colors": [],
+                "color_identity": [],
+                "legalities": {"commander": "legal"},
+                "image_uris": {"normal": f"https://img.test/{name.lower().replace(' ', '-')}.jpg"},
+            }
+            for name in names
+        ]
+
+    async def getBannedList(self) -> list[str]:
+        return ["Black Lotus"]
+
+    async def getGamechangers(self) -> list[str]:
+        return ["Rhystic Study", "Smothering Tithe"]
 
     async def aclose(self):
         pass
@@ -95,9 +119,24 @@ def test_build_endpoint_success(client):
     assert body["version"] == 1
     assert body["bracket"] == 3
     assert body["commander"]["name"] == "Atraxa, Praetors' Voice"
+    assert body["commander"]["image_uris"]["normal"] == "https://img.test/atraxa-normal.jpg"
     assert body["source"] == "heuristic"
     total = sum(c["count"] for c in body["decklist"])
     assert total == 99
+    sol_ring = next(card for card in body["decklist"] if card["name"] == "Sol Ring")
+    assert sol_ring["image_uris"]["normal"] == "https://img.test/sol-ring.jpg"
+
+
+def test_banned_list_endpoint_returns_named_payload(client):
+    response = client.get("/api/banned")
+    assert response.status_code == 200
+    assert response.json() == {"banned_list": ["Black Lotus"]}
+
+
+def test_gamechangers_endpoint_returns_named_payload(client):
+    response = client.get("/api/gamechangers")
+    assert response.status_code == 200
+    assert response.json() == {"gamechangers": ["Rhystic Study", "Smothering Tithe"]}
 
 
 def test_build_endpoint_rejects_prompt_without_llm(client):

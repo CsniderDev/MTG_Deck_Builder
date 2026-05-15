@@ -10,13 +10,15 @@ from __future__ import annotations
 import logging
 from typing import Any, Optional
 
-from ..constants import gamechanger_limit
+from ..constants import GAMECHANGERS, gamechanger_limit
 from ..models.schemas import (
     BRACKET_DESCRIPTIONS,
     BuildDeckRequest,
     MagicCard,
+    MagicCardFace,
     DeckResponse,
     RevampDeckRequest,
+    ScryfallImageUris,
 )
 from .edhrec import EDHRecClient, EDHRecError
 from .llm import LLMService
@@ -107,8 +109,9 @@ class DeckBuilder:
             )
 
         decklist, explanation, source, notes = self._materialize(
-            llm_result, commander_card, recommendations, request.bracket, request.gamechangers
+            llm_result, commander_card, recommendations, request.bracket, gamechangers
         )
+        decklist = await self._hydrate_cards(decklist)
         return DeckResponse(
             version=1,
             commander=_to_card(commander_card),
@@ -157,7 +160,6 @@ class DeckBuilder:
         previous_payload = [card.model_dump() for card in request.previous_decklist]
         banned_list = set(name.strip().lower() for name in request.banned_list or [])
         gamechangers = set(name.strip().lower() for name in request.gamechangers or [])
-        color_identity = commander_card.get("color_identity", [])
 
         llm_result = await self._llm.revamp_deck(
             commander=commander_card,
@@ -169,19 +171,19 @@ class DeckBuilder:
             gamechanger_limit=limit,
             gamechangers=gamechangers,
             banned_list=banned_list,
-            color_identity=color_identity,
         )
         if llm_result is None:
             # Without an LLM we cannot meaningfully revamp; rebuild instead.
             recommendations = await self._fetch_recommendations(commander_card["name"])
             decklist, explanation, source, notes = self._materialize(
-                None, commander_card, recommendations, request.bracket
+                None, commander_card, recommendations, request.bracket, gamechangers
             )
             notes.insert(0, "LLM unavailable - regenerated deck heuristically instead of revamping.")
         else:
             decklist, explanation, source, notes = self._materialize(
-                llm_result, commander_card, {}, request.bracket
+                llm_result, commander_card, {}, request.bracket, gamechangers
             )
+        decklist = await self._hydrate_cards(decklist)
 
         validation = await self.validate_decklist(
             llm_result.get("decklist") if llm_result else [], commander_card.get("color_identity", [])
@@ -234,7 +236,7 @@ class DeckBuilder:
         commander_card: dict[str, Any],
         recommendations: dict[str, list[dict[str, Any]]],
         bracket: int,
-        gamechangers: set[str],
+        gamechangers: Optional[set[str]] = None,
     ) -> tuple[list[MagicCard], str, str, list[str]]:
         notes: list[str] = []
         if llm_result and isinstance(llm_result.get("decklist"), list):
@@ -256,6 +258,34 @@ class DeckBuilder:
         decklist = _normalize_decklist(raw_list, commander_card, notes)
         return decklist, explanation, source, notes
 
+    async def _hydrate_cards(self, decklist: list[MagicCard]) -> list[MagicCard]:
+        if not decklist:
+            return decklist
+        try:
+            collection = await self._scryfall.get_collection([card.name for card in decklist])
+        except ScryfallError as exc:
+            logger.warning("Unable to hydrate decklist card metadata from Scryfall: %s", exc)
+            return decklist
+
+        cards_by_name = {
+            (card.get("name") or "").lower(): card
+            for card in collection
+            if isinstance(card, dict) and card.get("name")
+        }
+        for deck_card in decklist:
+            data = cards_by_name.get(deck_card.name.lower())
+            if not data:
+                continue
+            deck_card.scryfall_id = data.get("id") or deck_card.scryfall_id
+            deck_card.mana_cost = data.get("mana_cost") or deck_card.mana_cost
+            deck_card.type_line = data.get("type_line") or deck_card.type_line
+            deck_card.oracle_text = data.get("oracle_text") or deck_card.oracle_text
+            deck_card.colors = data.get("colors") or deck_card.colors
+            deck_card.color_identity = data.get("color_identity") or deck_card.color_identity
+            deck_card.image_uris = _to_image_uris(data.get("image_uris")) or deck_card.image_uris
+            deck_card.card_faces = _to_card_faces(data.get("card_faces")) or deck_card.card_faces
+        return decklist
+
 
 def _to_card(card: dict[str, Any]) -> MagicCard:
     return MagicCard(
@@ -268,8 +298,21 @@ def _to_card(card: dict[str, Any]) -> MagicCard:
         oracle_text=card.get("oracle_text"),
         colors=card.get("colors") or [],
         color_identity=card.get("color_identity") or [],
-        image_uri=card.get("image_uris", {}).get("normal"),
+        image_uris=_to_image_uris(card.get("image_uris")),
+        card_faces=_to_card_faces(card.get("card_faces")),
     )
+
+
+def _to_image_uris(image_uris: Any) -> Optional[ScryfallImageUris]:
+    if not isinstance(image_uris, dict):
+        return None
+    return ScryfallImageUris.model_validate(image_uris)
+
+
+def _to_card_faces(card_faces: Any) -> list[MagicCardFace]:
+    if not isinstance(card_faces, list):
+        return []
+    return [MagicCardFace.model_validate(face) for face in card_faces if isinstance(face, dict)]
 
 
 def _normalize_decklist(
@@ -344,11 +387,13 @@ def _pad_with_basics(deck: dict[str, MagicCard], commander_card: dict[str, Any],
 
 
 def _enforce_gamechanger_limit(
-    raw_list: list[Any], bracket: int, notes: list[str], gamechangers: set[str]
+    raw_list: list[Any], bracket: int, notes: list[str], gamechangers: Optional[set[str]] = None
 ) -> list[Any]:
     limit = gamechanger_limit(bracket)
     if limit is None:
         return raw_list
+    source_names = gamechangers or {name.lower() for name in GAMECHANGERS}
+    gamechanger_names = {name.strip().lower() for name in source_names if name}
     kept: list[Any] = []
     gc_count = 0
     removed = 0
@@ -357,7 +402,7 @@ def _enforce_gamechanger_limit(
             kept.append(entry)
             continue
         name = (entry.get("name") or "").strip()
-        if name in gamechangers:
+        if name.lower() in gamechanger_names:
             if gc_count >= limit:
                 removed += 1
                 continue
@@ -375,13 +420,15 @@ def _heuristic_decklist(
     commander_card: dict[str, Any],
     recommendations: dict[str, list[dict[str, Any]]],
     bracket: int,
-    gamechangers: set[str],
+    gamechangers: Optional[set[str]] = None,
 ) -> list[dict[str, Any]]:
     picks: list[dict[str, Any]] = []
     seen: set[str] = set()
     commander_name = (commander_card.get("name") or "").lower()
     limit = gamechanger_limit(bracket)
     gc_count = 0
+    source_names = gamechangers or {name.lower() for name in GAMECHANGERS}
+    gamechanger_names = {name.strip().lower() for name in source_names if name}
     # Walk categories and grab their top recommendations until we approach 65 nonland picks.
     target_nonland = 65
     for header, cards in recommendations.items():
@@ -389,11 +436,11 @@ def _heuristic_decklist(
             name = card.get("name")
             if not name or name.lower() == commander_name or name.lower() in seen:
                 continue
-            if name in gamechangers and limit is not None and gc_count >= limit:
+            if name.lower() in gamechanger_names and limit is not None and gc_count >= limit:
                 continue
             picks.append({"name": name, "count": 1, "category": header})
             seen.add(name.lower())
-            if name in gamechangers:
+            if name.lower() in gamechanger_names:
                 gc_count += 1
             if len(picks) >= target_nonland:
                 break

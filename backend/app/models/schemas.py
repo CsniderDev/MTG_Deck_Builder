@@ -17,6 +17,22 @@ BRACKET_DESCRIPTIONS: dict[int, str] = {
 }
 
 
+class ScryfallImageUris(BaseModel):
+    small: Optional[str] = None
+    normal: Optional[str] = None
+    large: Optional[str] = None
+    png: Optional[str] = None
+    art_crop: Optional[str] = None
+    border_crop: Optional[str] = None
+
+
+class MagicCardFace(BaseModel):
+    name: str
+    image_uris: Optional[ScryfallImageUris] = None
+    type_line: Optional[str] = None
+    oracle_text: Optional[str] = None
+
+
 class MagicCard(BaseModel):
     name: str
     count: int = 1
@@ -24,22 +40,27 @@ class MagicCard(BaseModel):
     scryfall_id: Optional[str] = None
     mana_cost: Optional[str] = None
     type_line: Optional[str] = None
+    oracle_text: Optional[str] = None
+    colors: list[str] = Field(default_factory=list)
+    color_identity: list[str] = Field(default_factory=list)
+    image_uris: Optional[ScryfallImageUris] = None
+    card_faces: list[MagicCardFace] = Field(default_factory=list)
 
 
 class BuildDeckRequest(BaseModel):
     commander: str = Field(..., min_length=1, max_length=200)
     bracket: BracketLevel
     prompt: str = Field(default="", max_length=4000)
-    gamechangers: list[str] = []
-    banned_list: list[str] = []
+    gamechangers: list[str] = Field(default_factory=list)
+    banned_list: list[str] = Field(default_factory=list)
 
 
 class RevampDeckRequest(BaseModel):
     commander: str
     bracket: BracketLevel
     prompt: str = ""
-    gamechangers: list[str] = []
-    banned_list: list[str] = []
+    gamechangers: list[str] = Field(default_factory=list)
+    banned_list: list[str] = Field(default_factory=list)
     previous_version: int = 1
     previous_decklist: list[MagicCard]
     change_request: str = Field(..., min_length=1, max_length=4000)
@@ -53,9 +74,17 @@ class DeckResponse(BaseModel):
     prompt: str
     decklist: list[MagicCard]
     explanation: str
-    notes: list[str] = []
+    notes: list[str] = Field(default_factory=list)
     source: Literal["llm", "heuristic"]
 
 
 class AutocompleteResponse(BaseModel):
     suggestions: list[str]
+
+
+class BannedListResponse(BaseModel):
+    banned_list: list[str] = Field(default_factory=list)
+
+
+class GamechangersResponse(BaseModel):
+    gamechangers: list[str] = Field(default_factory=list)

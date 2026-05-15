@@ -90,12 +90,12 @@ export default function DeckResult({
           {[...grouped.entries()].map(([cat, cards]) => (
             <div className="category" key={cat}>
               <h3>{cat}</h3>
-              <ul>
+              <ul className="card-stack-list">
                 {cards.map((card) => (
-                  <li key={card.name} style={{ listStyle: 'none' }}>
-                    <MagicCardItem card={card as MagicCard} />
-
-                    {/* If your MagicCardItem doesn't show the count, add it here or inside the component */}
+                  <li key={card.name} className="card-stack-item">
+                    <div className="card-stack-media">
+                      <MagicCardItem card={card as MagicCard} />
+                    </div>
                     <div className="card-label">
                       <span className="count">{card.count}x</span> {card.name}
                     </div>

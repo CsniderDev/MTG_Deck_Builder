@@ -10,8 +10,10 @@ from fastapi.middleware.cors import CORSMiddleware
 from .config import get_settings
 from .models.schemas import (
     AutocompleteResponse,
+    BannedListResponse,
     BuildDeckRequest,
     DeckResponse,
+    GamechangersResponse,
     RevampDeckRequest,
 )
 from .services.deck_builder import DeckBuilder, DeckBuilderError
@@ -85,10 +87,10 @@ async def autocomplete_cards(
     )
     return AutocompleteResponse(suggestions=suggestions)
 
-@app.get("/api/banned")
-async def get_banned_list() -> list[str]:
-    return await app.state.scryfall.getBannedList()
+@app.get("/api/banned", response_model=BannedListResponse)
+async def get_banned_list() -> BannedListResponse:
+    return BannedListResponse(banned_list=await app.state.scryfall.getBannedList())
 
-@app.get("/api/gamechangers")
-async def get_gamechangers() -> list[str]:
-    return await app.state.scryfall.getGamechangers()
+@app.get("/api/gamechangers", response_model=GamechangersResponse)
+async def get_gamechangers() -> GamechangersResponse:
+    return GamechangersResponse(gamechangers=await app.state.scryfall.getGamechangers())

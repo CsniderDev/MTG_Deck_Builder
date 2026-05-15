@@ -1,5 +1,5 @@
 import React, { useState } from 'react';
-import { MagicCard, ScryfallImageUris } from '../types'; 
+import type { MagicCard, ScryfallImageUris } from '../types';
 interface MagicCardProps {
   card: MagicCard;
 }
@@ -10,11 +10,14 @@ const MagicCardItem: React.FC<MagicCardProps> = ({ card }) => {
   // Helper to handle DFCs (Double-Faced Cards) logic safely
   const getImageUrl = (size: keyof ScryfallImageUris): string => {
     if (card.image_uris) {
-      return card.image_uris[size];
+      return card.image_uris[size] || '';
     }
     // Fallback to the front face for DFCs
     return card.card_faces?.[0]?.image_uris?.[size] || '';
   };
+
+  const normalImageUrl = getImageUrl('normal');
+  const previewImageUrl = getImageUrl('large') || normalImageUrl;
 
   return (
     <div 
@@ -22,16 +25,18 @@ const MagicCardItem: React.FC<MagicCardProps> = ({ card }) => {
       onMouseEnter={() => setIsHovered(true)}
       onMouseLeave={() => setIsHovered(false)}
     >
-      <img 
-        src={getImageUrl('normal')} 
-        alt={card.name} 
-        className="card-image" 
-        loading="lazy"
-      />
+      {normalImageUrl ? (
+        <img 
+          src={normalImageUrl} 
+          alt={card.name} 
+          className="card-image" 
+          loading="lazy"
+        />
+      ) : null}
 
-      {isHovered && (
+      {isHovered && previewImageUrl && (
         <div className="card-hover-preview">
-          <img src={getImageUrl('large')} alt={card.name} />
+          <img src={previewImageUrl} alt={card.name} />
         </div>
       )}
     </div>

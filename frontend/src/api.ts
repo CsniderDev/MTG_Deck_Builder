@@ -1,7 +1,9 @@
 import type {
   AutocompleteResponse,
+  BannedListResponse,
   BuildDeckPayload,
   DeckResponse,
+  GamechangersResponse,
   HealthStatus,
   RevampDeckPayload,
 } from './types';
@@ -45,7 +47,7 @@ export async function fetchBannedListAndGamechangers(): Promise<{ banned_list: s
 export async function fetchBannedList(): Promise<string[]> {
   const response = await fetch('/api/banned');
   if (!response.ok) throw new Error('Failed to fetch banned list');
-  const data = (await response.json()) as { banned_list: string[] };
+  const data = (await response.json()) as BannedListResponse;
   console.log('Fetched banned list:', data);
   return data.banned_list || [];
 }
@@ -53,7 +55,7 @@ export async function fetchBannedList(): Promise<string[]> {
 export async function fetchGamechangers(): Promise<string[]> {
   const response = await fetch('/api/gamechangers');
   if (!response.ok) throw new Error('Failed to fetch gamechangers');
-  const data = (await response.json()) as { gamechangers: string[] };
+  const data = (await response.json()) as GamechangersResponse;
   console.log('Fetched gamechangers:', data);
   return data.gamechangers || [];
 }

@@ -46,6 +46,8 @@ describe('DeckForm', () => {
       commander: 'Krenko, Mob Boss',
       bracket: 4,
       prompt: 'goblin tribal',
+      gamechangers: [],
+      banned_list: [],
     });
   });
 

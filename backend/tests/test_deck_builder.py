@@ -18,7 +18,9 @@ ATRAXA = {
     "oracle_text": "Flying, vigilance, deathtouch, lifelink",
     "legalities": {"commander": "legal"},
     "color_identity": ["W", "U", "B", "G"],
+    "colors": ["W", "U", "B", "G"],
     "mana_cost": "{G}{W}{U}{B}",
+    "image_uris": {"normal": "https://img.test/atraxa-normal.jpg"},
 }
 
 MONOR = {
@@ -28,6 +30,7 @@ MONOR = {
     "oracle_text": "Tap: Create X 1/1 red Goblin tokens.",
     "legalities": {"commander": "legal"},
     "color_identity": ["R"],
+    "image_uris": {"normal": "https://img.test/krenko-normal.jpg"},
 }
 
 
@@ -85,6 +88,22 @@ def test_normalize_drops_commander_from_list():
 class _StubScryfall:
     async def resolve_commander(self, name):
         return ATRAXA
+
+    async def get_collection(self, names):
+        return [
+            {
+                "id": f"id-{name.lower().replace(' ', '-')}",
+                "name": name,
+                "type_line": "Artifact",
+                "oracle_text": f"Rules text for {name}",
+                "mana_cost": "{1}",
+                "colors": [],
+                "color_identity": [],
+                "legalities": {"commander": "legal"},
+                "image_uris": {"normal": f"https://img.test/{name.lower().replace(' ', '-')}.jpg"},
+            }
+            for name in names
+        ]
 
     async def aclose(self):
         pass
@@ -146,6 +165,9 @@ async def test_build_without_llm_uses_heuristic():
     assert sum(c.count for c in result.decklist) == DECK_SIZE
     names = {c.name for c in result.decklist}
     assert "Sol Ring" in names or "Command Tower" in names
+    sol_ring = next(card for card in result.decklist if card.name == "Sol Ring")
+    assert sol_ring.image_uris is not None
+    assert sol_ring.image_uris.normal == "https://img.test/sol-ring.jpg"
 
 
 @pytest.mark.asyncio

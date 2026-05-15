@@ -7,6 +7,32 @@ to three, and brackets 4-5 are unconstrained.
 from __future__ import annotations
 
 # Maximum game-changers permitted per bracket. ``None`` means unrestricted.
+GAMECHANGERS: frozenset[str] = frozenset(
+    {
+        "Ancient Tomb",
+        "Cyclonic Rift",
+        "Deflecting Swat",
+        "Drannith Magistrate",
+        "Enlightened Tutor",
+        "Esper Sentinel",
+        "Fierce Guardianship",
+        "Force of Will",
+        "Gaea's Cradle",
+        "Jeweled Lotus",
+        "Mana Crypt",
+        "Mana Drain",
+        "Mox Diamond",
+        "Mystic Remora",
+        "Necropotence",
+        "Opposition Agent",
+        "Orcish Bowmasters",
+        "Rhystic Study",
+        "Smothering Tithe",
+        "The One Ring",
+        "Vampiric Tutor",
+    }
+)
+
 GAMECHANGER_LIMITS: dict[int, int | None] = {1: 0, 2: 0, 3: 3, 4: None, 5: None}
 
 

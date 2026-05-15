@@ -39,6 +39,14 @@ export interface HealthStatus {
   llm_enabled: boolean;
 }
 
+export interface BannedListResponse {
+  banned_list: string[];
+}
+
+export interface GamechangersResponse {
+  gamechangers: string[];
+}
+
 export interface AutocompleteResponse {
   suggestions: string[];
 }
@@ -46,38 +54,31 @@ export interface AutocompleteResponse {
 // types/mtg.ts
 
 export interface ScryfallImageUris {
-  small: string;
-  normal: string;
-  large: string;
-  png: string;
-  art_crop: string;
-  border_crop: string;
+  small?: string;
+  normal?: string;
+  large?: string;
+  png?: string;
+  art_crop?: string;
+  border_crop?: string;
 }
 
 export interface ScryfallCardFace {
   name: string;
   image_uris?: ScryfallImageUris;
-  type_line: string;
+  type_line?: string;
   oracle_text?: string;
 }
 
 export interface MagicCard {
-  id: string;
   name: string;
   count: number;
   category?: string;
-  type_line: string;
+  scryfall_id?: string;
+  type_line?: string;
   oracle_text?: string;
   mana_cost?: string;
-  cmc: number;
   colors?: string[];
-  color_identity: string[];
-  // Top-level image_uris for single-faced cards
+  color_identity?: string[];
   image_uris?: ScryfallImageUris;
-  // card_faces for double-faced cards (Transform/Meld/etc)
   card_faces?: ScryfallCardFace[];
-  legalities: {
-    commander: 'legal' | 'not_legal' | 'restricted' | 'banned';
-  };
-  keywords: string[];
 }
