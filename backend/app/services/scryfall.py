@@ -6,8 +6,8 @@ shared httpx.AsyncClient. See https://scryfall.com/docs/api.
 from __future__ import annotations
 
 import asyncio
+import logging
 from typing import Any, Optional
-from venv import logger
 
 import httpx
 
@@ -31,6 +31,11 @@ class ScryfallClient:
         )
         self._own_client = client is None
         self._lock = asyncio.Lock()
+        self._logger = logging.getLogger(__name__)
+        self._named_cache: dict[tuple[str, bool], dict[str, Any]] = {}
+        self._collection_cache: dict[str, dict[str, Any]] = {}
+        self._banned_list_cache: Optional[list[str]] = None
+        self._gamechangers_cache: Optional[list[str]] = None
 
     async def aclose(self) -> None:
         if self._own_client:
@@ -47,8 +52,13 @@ class ScryfallClient:
         return response.json()
 
     async def named(self, name: str, fuzzy: bool = True) -> dict[str, Any]:
+        cache_key = (name.strip().lower(), fuzzy)
+        if cache_key in self._named_cache:
+            return self._named_cache[cache_key]
         key = "fuzzy" if fuzzy else "exact"
-        return await self._get("/cards/named", {key: name})
+        card = await self._get("/cards/named", {key: name})
+        self._named_cache[cache_key] = card
+        return card
 
     async def resolve_commander(self, name: str) -> dict[str, Any]:
         card = await self.named(name, fuzzy=True)
@@ -113,6 +123,8 @@ class ScryfallClient:
     async def getBannedList(
         self
     ) -> list[str]:
+        if self._banned_list_cache is not None:
+            return list(self._banned_list_cache)
         try:
             data = await self._get(
                 "/cards/search",
@@ -122,7 +134,7 @@ class ScryfallClient:
                     "unique": "cards",
                 },
             )
-            logger.info("Fetched banned list: %d cards", len(data.get("data") or []))
+            self._logger.info("Fetched banned list: %d cards", len(data.get("data") or []))
         except ScryfallError:
             return []
         seen: list[str] = []
@@ -130,7 +142,8 @@ class ScryfallClient:
             name = card.get("name")
             if name and name not in seen:
                 seen.append(name)
-        logger.info("Fetched banned list: %d cards", len(seen))
+        self._logger.info("Fetched banned list: %d cards", len(seen))
+        self._banned_list_cache = list(seen)
         return seen
 
 
@@ -138,6 +151,8 @@ class ScryfallClient:
     async def getGamechangers(
             self
     ) -> list[str]:
+        if self._gamechangers_cache is not None:
+            return list(self._gamechangers_cache)
         try:
             data = await self._get(
                 "/cards/search",
@@ -155,52 +170,49 @@ class ScryfallClient:
             if name and name not in seen:
                 seen.append(name)       
 
-        logger.info("Fetched gamechangers: %d cards", len(seen)) 
+        self._logger.info("Fetched gamechangers: %d cards", len(seen)) 
+        self._gamechangers_cache = list(seen)
         return seen
 
 
 
     async def get_collection(self, names: list[str]) -> list[dict]:
-        # Scryfall limit is 75, but 50 is safer and faster for large payloads
-        unique_names = list(set(n for n in names if n))
-    
-        chunk_size = 50
-        all_data = []
+        unique_names = list(dict.fromkeys(n.strip() for n in names if n and n.strip()))
+        if not unique_names:
+            return []
 
-        for i in range(0, len(unique_names), chunk_size):
-            chunk = unique_names[i:i + chunk_size]
+        missing_names = [name for name in unique_names if name.lower() not in self._collection_cache]
+        chunk_size = 75
+
+        for i in range(0, len(missing_names), chunk_size):
+            chunk = missing_names[i:i + chunk_size]
             payload = {"identifiers": [{"name": n} for n in chunk]}
-
-            # This will now use the increased timeout from your _post method
             response_data = await self._post("/cards/collection", payload)
-            all_data.extend(response_data.get("data", []))
+            for card in response_data.get("data", []):
+                card_name = (card.get("name") or "").strip().lower()
+                if card_name:
+                    self._collection_cache[card_name] = card
 
-            # Small sleep to be a good citizen and avoid 429 Rate Limits
-            await asyncio.sleep(0.1) 
-
-        return all_data
+        return [
+            self._collection_cache[name.lower()]
+            for name in unique_names
+            if name.lower() in self._collection_cache
+        ]
 
     async def _post(self, path: str, json_data: dict) -> dict:
-        """
-        Helper for POST requests with increased timeout to prevent ReadTimeout errors.
-        """
-        # Define a generous timeout: 10s to connect, 60s to read the data
-        timeout = httpx.Timeout(60.0, connect=10.0)
+        try:
+            async with self._lock:
+                await asyncio.sleep(_REQUEST_DELAY)
+                response = await self._client.post(
+                    f"{self._base}{path}",
+                    json=json_data,
+                    timeout=httpx.Timeout(60.0, connect=10.0),
+                )
+        except httpx.ReadTimeout as exc:
+            raise ScryfallError("Scryfall timed out while processing the card collection.") from exc
 
-        async with httpx.AsyncClient(timeout=timeout) as client:
-            url = f"https://api.scryfall.com{path}"
-            headers = {
-                "User-Agent": "MTG-Deck-Builder-App/1.0", 
-                "Accept": "application/json"
-            }
-            
-            try:
-                response = await client.post(url, json=json_data, headers=headers)
-                
-                if response.status_code != 200:
-                    raise ScryfallError(f"Scryfall API error: {response.status_code} {response.text}")
-                    
-                return response.json()
-            except httpx.ReadTimeout:
-                # Re-raising as your custom error or logging it specifically
-                raise ScryfallError("Scryfall timed out while processing the card collection.")
+        if response.status_code == 404:
+            raise ScryfallError(f"Not found: {path}")
+        if response.status_code >= 400:
+            raise ScryfallError(f"Scryfall {response.status_code}: {response.text[:200]}")
+        return response.json()

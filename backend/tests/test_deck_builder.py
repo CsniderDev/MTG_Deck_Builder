@@ -86,10 +86,14 @@ def test_normalize_drops_commander_from_list():
 
 
 class _StubScryfall:
+    def __init__(self):
+        self.collection_calls = 0
+
     async def resolve_commander(self, name):
         return ATRAXA
 
     async def get_collection(self, names):
+        self.collection_calls += 1
         return [
             {
                 "id": f"id-{name.lower().replace(' ', '-')}",
@@ -168,6 +172,19 @@ async def test_build_without_llm_uses_heuristic():
     sol_ring = next(card for card in result.decklist if card.name == "Sol Ring")
     assert sol_ring.image_uris is not None
     assert sol_ring.image_uris.normal == "https://img.test/sol-ring.jpg"
+
+
+@pytest.mark.asyncio
+async def test_build_with_full_llm_payload_reuses_validation_collection_for_hydration():
+    payload = {
+        "decklist": [{"name": f"Card {i}", "count": 1, "category": "Misc"} for i in range(99)],
+        "explanation": "Fast plan.",
+    }
+    scryfall = _StubScryfall()
+    builder = DeckBuilder(scryfall, _StubEDHRec(), _StubLLM(payload))
+    result = await builder.build(BuildDeckRequest(commander="Atraxa", bracket=3, prompt="combo"))
+    assert result.source == "llm"
+    assert scryfall.collection_calls == 1
 
 
 @pytest.mark.asyncio

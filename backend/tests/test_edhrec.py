@@ -67,6 +67,23 @@ async def test_commander_page_not_found_raises():
             await client.aclose()
 
 
+@pytest.mark.asyncio
+async def test_commander_page_uses_cache_for_repeat_requests():
+    sample = {"container": {"json_dict": {"cardlists": []}}}
+    with respx.mock(base_url="https://json.edhrec.com") as router:
+        route = router.get("/pages/commanders/atraxa-praetors-voice.json").mock(
+            return_value=httpx.Response(200, json=sample)
+        )
+        client = EDHRecClient()
+        try:
+            first = await client.commander_page("Atraxa, Praetors' Voice")
+            second = await client.commander_page("Atraxa, Praetors' Voice")
+        finally:
+            await client.aclose()
+    assert first == second == sample
+    assert route.call_count == 1
+
+
 def test_extract_recommendations_skips_empty_groups():
     page = {"container": {"json_dict": {"cardlists": [{"header": "Empty", "cardviews": []}]}}}
     assert EDHRecClient.extract_recommendations(page) == {}

@@ -199,24 +199,27 @@ button.secondary { background: var(--accent-2); color: #0a0c12; }
 }
 
 .card-hover-preview {
-  position: absolute;
-  top: -12px;
-  left: calc(100% + 12px);
-  width: 300px;
-  z-index: 100;
-  pointer-events: none; /* Prevents the hover from flickering */
-  animation: fadeIn 0.15s ease-out;
+  position: fixed;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 9999;
+  pointer-events: none;
 }
 
 .card-hover-preview img {
-  width: 100%;
+  width: min(380px, calc(100vw - 40px));
+  max-height: calc(100vh - 40px);
+  object-fit: contain;
   border-radius: 4.75%;
   box-shadow: 0 10px 25px rgba(0,0,0,0.5);
   border: 1px solid #333;
+  animation: cardPreviewFadeIn 0.15s ease-out;
 }
 
-@keyframes fadeIn {
-  from { opacity: 0; transform: scale(0.95); }
+@keyframes cardPreviewFadeIn {
+  from { opacity: 0; transform: scale(0.96); }
   to { opacity: 1; transform: scale(1); }
 }
 
@@ -231,6 +234,60 @@ button.secondary { background: var(--accent-2); color: #0a0c12; }
   position: relative;
   min-height: 38px;
   padding-left: 92px;
+}
+
+/* The main wrapper */
+.deck-result__header {
+  display: flex;
+  justify-content: space-between;
+  width: 100%;
+  padding: 2rem;
+  border-bottom: 1px solid #333;
+}
+
+/* The Center Piece */
+.commander-header {
+  flex: 2; /* Takes up the middle space */
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 1rem;
+  text-align: center;
+}
+
+.commander-header h2 {
+  font-size: 2.2rem;
+  margin: 0;
+  letter-spacing: -0.5px;
+}
+
+.commander-image {
+  width: 280px; /* Slightly smaller to fit better on laptop screens */
+  box-shadow: 0 10px 30px rgba(0,0,0,0.5);
+  border-radius: 4.75%;
+}
+
+/* The Button Container */
+.deck-result__header button.primary {
+  flex: 1;
+  max-width: 160px; /* Prevents the button from stretching too wide */
+  margin-left: auto; /* Pushes it to the far right */
+  padding: 12px 20px;
+  height: fit-content;
+}
+
+/* Mobile Responsiveness */
+@media (max-width: 768px) {
+  .deck-result__header {
+    flex-direction: column;
+    align-items: center;
+    gap: 2rem;
+  }
+  .deck-result__header::before { display: none; }
+  .deck-result__header button.primary {
+    margin-left: 0;
+    width: 100%;
+  }
 }
 
 .card-stack-item:last-child {
@@ -273,13 +330,4 @@ button.secondary { background: var(--accent-2); color: #0a0c12; }
   background: rgba(110, 168, 254, 0.08);
   border-color: rgba(110, 168, 254, 0.2);
   transform: translateX(4px);
-}
-
-@media (max-width: 900px) {
-  .card-hover-preview {
-    left: 50%;
-    top: -8px;
-    transform: translateX(-10%);
-    width: 220px;
-  }
 }

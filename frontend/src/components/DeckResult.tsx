@@ -61,20 +61,25 @@ export default function DeckResult({
   return (
     <section className="deck-result">
       <header className="deck-result__header">
-        <div>
+        <div className="commander-header">
           <h2>
             {deck.commander.name} <span className="badge">v{deck.version}</span>
           </h2>
+
           <p className="muted">
             Bracket {deck.bracket} - {deck.bracket_description}
           </p>
           <p className="muted">
             {totalCards} cards total - source: {deck.source}
           </p>
+
+          <div className="commander-image">
+            <MagicCardItem
+              card={deck.commander as MagicCard}
+              disableHover={true}
+            />
+          </div>
         </div>
-        <button type="button" className="primary" onClick={handleCopy}>
-          {copied ? 'Copied!' : 'Copy decklist'}
-        </button>
       </header>
 
       {deck.notes?.length > 0 && (
@@ -122,6 +127,9 @@ export default function DeckResult({
             />
             <button type="submit" className="secondary" disabled={revamping || !changeRequest.trim()}>
               {revamping ? 'Revamping…' : `Generate v${deck.version + 1}`}
+            </button>
+            <button type="button" className="primary" onClick={handleCopy}>
+              {copied ? 'Copied!' : 'Copy decklist'}
             </button>
           </form>
         </aside>

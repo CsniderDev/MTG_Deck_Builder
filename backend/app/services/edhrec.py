@@ -37,6 +37,7 @@ class EDHRecClient:
             headers={"User-Agent": "MTG-Deck-Builder/0.1", "Accept": "application/json"},
         )
         self._own_client = client is None
+        self._page_cache: dict[str, dict[str, Any]] = {}
 
     async def aclose(self) -> None:
         if self._own_client:
@@ -44,13 +45,17 @@ class EDHRecClient:
 
     async def commander_page(self, commander_name: str) -> dict[str, Any]:
         slug = commander_to_slug(commander_name)
+        if slug in self._page_cache:
+            return self._page_cache[slug]
         url = f"{self._base}/pages/commanders/{slug}.json"
         response = await self._client.get(url)
         if response.status_code == 404:
             raise EDHRecError(f"EDHREC has no page for commander slug {slug!r}.")
         if response.status_code >= 400:
             raise EDHRecError(f"EDHREC {response.status_code} for {slug!r}")
-        return response.json()
+        page = response.json()
+        self._page_cache[slug] = page
+        return page
 
     @staticmethod
     def extract_recommendations(page: dict[str, Any]) -> dict[str, list[dict[str, Any]]]:

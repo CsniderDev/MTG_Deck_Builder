@@ -177,3 +177,24 @@ async def test_get_card_falls_back_to_fuzzy():
     assert card is not None
     assert card["name"] == "Atraxa, Praetors' Voice"
     assert call_count["n"] == 2
+
+
+@pytest.mark.asyncio
+async def test_get_collection_caches_cards_across_calls():
+    payload = {
+        "data": [
+            {"name": "Sol Ring", "legalities": {"commander": "legal"}},
+            {"name": "Arcane Signet", "legalities": {"commander": "legal"}},
+        ]
+    }
+    with respx.mock(base_url="https://api.scryfall.com") as router:
+        route = router.post("/cards/collection").mock(return_value=httpx.Response(200, json=payload))
+        client = ScryfallClient()
+        try:
+            cards = await client.get_collection(["Sol Ring", "Arcane Signet"])
+            again = await client.get_collection(["Sol Ring"])
+        finally:
+            await client.aclose()
+    assert [card["name"] for card in cards] == ["Sol Ring", "Arcane Signet"]
+    assert [card["name"] for card in again] == ["Sol Ring"]
+    assert route.call_count == 1

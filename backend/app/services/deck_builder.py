@@ -56,6 +56,7 @@ class DeckBuilder:
         gamechangers = set(name.strip().lower() for name in request.gamechangers or [])
 
         llm_result: Optional[dict[str, Any]] = None
+        prefetched_cards: dict[str, dict[str, Any]] = {}
         if has_prompt:
             if not self._llm.enabled:
                 raise DeckBuilderError(
@@ -90,11 +91,12 @@ class DeckBuilder:
                     "retry, or clear the deck concept to use a heuristic build."
                 )
 
-        validation = await self.validate_decklist(
-            llm_result.get("decklist") if llm_result else [], commander_card.get("color_identity", [])
-        )
-
-        invalid_cards = validation[1]
+        if llm_result:
+            prefetched_cards, invalid_cards = await self.validate_decklist(
+                llm_result.get("decklist") or [], commander_card.get("color_identity", [])
+            )
+        else:
+            invalid_cards = []
         if invalid_cards: 
             llm_result = await self._llm.build_deck(
                 commander=commander_card,
@@ -105,13 +107,13 @@ class DeckBuilder:
                 gamechanger_limit=limit,
                 gamechangers=gamechangers,
                 banned_list=banned_list,
-                color_identity=commander_card.get("color_identity", []),
             )
+            prefetched_cards = {}
 
         decklist, explanation, source, notes = self._materialize(
             llm_result, commander_card, recommendations, request.bracket, gamechangers
         )
-        decklist = await self._hydrate_cards(decklist)
+        decklist = await self._hydrate_cards(decklist, prefetched_cards)
         return DeckResponse(
             version=1,
             commander=_to_card(commander_card),
@@ -134,7 +136,7 @@ class DeckBuilder:
         # with {"identifiers": [{"name": n} for n in names]}
         all_card_data = await self._scryfall.get_collection(names)
         
-        valid_cards = []
+        valid_cards: dict[str, dict[str, Any]] = {}
         invalid_cards = []
         commander_identity = set(commander_colors)
 
@@ -146,7 +148,9 @@ class DeckBuilder:
             is_color_valid = card_identity.issubset(commander_identity)
 
             if is_legal and is_color_valid:
-                valid_cards.append(data)
+                name = (data.get('name') or '').strip().lower()
+                if name:
+                    valid_cards[name] = data
             else:
                 reason = "Banned" if not is_legal else "Color Mismatch"
                 invalid_cards.append(f"{data.get('name')} ({reason})")
@@ -160,6 +164,8 @@ class DeckBuilder:
         previous_payload = [card.model_dump() for card in request.previous_decklist]
         banned_list = set(name.strip().lower() for name in request.banned_list or [])
         gamechangers = set(name.strip().lower() for name in request.gamechangers or [])
+        recommendations: dict[str, list[dict[str, Any]]] = {}
+        prefetched_cards: dict[str, dict[str, Any]] = {}
 
         llm_result = await self._llm.revamp_deck(
             commander=commander_card,
@@ -180,29 +186,13 @@ class DeckBuilder:
             )
             notes.insert(0, "LLM unavailable - regenerated deck heuristically instead of revamping.")
         else:
+            prefetched_cards, invalid_cards = await self.validate_decklist(
+                llm_result.get("decklist") or [], commander_card.get("color_identity", [])
+            )
             decklist, explanation, source, notes = self._materialize(
                 llm_result, commander_card, {}, request.bracket, gamechangers
             )
-        decklist = await self._hydrate_cards(decklist)
-
-        validation = await self.validate_decklist(
-            llm_result.get("decklist") if llm_result else [], commander_card.get("color_identity", [])
-        )
-
-        invalid_cards = validation[1]
-        if invalid_cards: 
-            llm_result = await self._llm.revamp_deck(
-                commander=commander_card,
-                bracket=request.bracket,
-                bracket_description=bracket_desc,
-                user_prompt=request.prompt,
-                recommendations=recommendations,
-                gamechanger_limit=limit,
-                gamechangers=gamechangers,
-                banned_list=banned_list,
-                previous_decklist=previous_payload,
-                change_request=request.change_request,
-            )
+        decklist = await self._hydrate_cards(decklist, prefetched_cards)
 
         return DeckResponse(
             version=request.previous_version + 1,
@@ -258,20 +248,31 @@ class DeckBuilder:
         decklist = _normalize_decklist(raw_list, commander_card, notes)
         return decklist, explanation, source, notes
 
-    async def _hydrate_cards(self, decklist: list[MagicCard]) -> list[MagicCard]:
+    async def _hydrate_cards(
+        self,
+        decklist: list[MagicCard],
+        prefetched_cards: Optional[dict[str, dict[str, Any]]] = None,
+    ) -> list[MagicCard]:
         if not decklist:
             return decklist
-        try:
-            collection = await self._scryfall.get_collection([card.name for card in decklist])
-        except ScryfallError as exc:
-            logger.warning("Unable to hydrate decklist card metadata from Scryfall: %s", exc)
-            return decklist
+        cards_by_name = dict(prefetched_cards or {})
+        missing_names = [card.name for card in decklist if card.name.lower() not in cards_by_name]
+        if missing_names:
+            try:
+                collection = await self._scryfall.get_collection(missing_names)
+            except ScryfallError as exc:
+                logger.warning("Unable to hydrate decklist card metadata from Scryfall: %s", exc)
+                collection = []
+        else:
+            collection = []
 
-        cards_by_name = {
-            (card.get("name") or "").lower(): card
-            for card in collection
-            if isinstance(card, dict) and card.get("name")
-        }
+        cards_by_name.update(
+            {
+                (card.get("name") or "").lower(): card
+                for card in collection
+                if isinstance(card, dict) and card.get("name")
+            }
+        )
         for deck_card in decklist:
             data = cards_by_name.get(deck_card.name.lower())
             if not data:
