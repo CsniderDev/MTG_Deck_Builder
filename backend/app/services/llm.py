@@ -159,9 +159,22 @@ class LLMService:
             names = ", ".join(c["name"] for c in cards[:40] if c.get("name"))
             if names:
                 rec_lines.append(f"- {header}: {names}")
+        
         recs_block = "\n".join(rec_lines) if rec_lines else "(no EDHREC data available)"
         concept = user_prompt or "(none provided - use the commander's strengths)"
         gc_block = _gamechanger_block(gamechanger_limit, gamechangers)
+
+        budget_block = ""
+        budgetConstraint = r"/(?:budget|max|limit|under|cost|price)\s*[\$]?\s*(\d+(?:\.\d{2})?)|[\$](\d+(?:\.\d{2})?)\s*(?:dollars|bucks|usd)?/i;"
+        budgetMatch = re.search(budgetConstraint, user_prompt, re.IGNORECASE) if user_prompt else None
+        dollar_pattern = r"[\$](\d+(?:\.\d{2})?)"
+
+        if budgetMatch:
+            budget_block = f"The budget for the deck must be at or under: ${budgetMatch.group(1) or budgetMatch.group(2)}\n\n"
+        
+        budgetMatch = re.search(dollar_pattern, user_prompt, re.IGNORECASE) if user_prompt else None
+        if budgetMatch and not budget_block:
+            budget_block = f"The user mentioned a budget of ${budgetMatch.group(1)}, but it was not clear if this was a constraint. If it is a constraint, the deck must be at or under this budget.\n\n"
         return (
             f"You are an expert Magic: The Gathering Commander deck builder.\n\n"
             f"Commander: {commander.get('name')}\n"
@@ -170,6 +183,7 @@ class LLMService:
             f"Oracle text: {commander.get('oracle_text') or '(none)'}\n\n"
             f"Bracket {bracket}: {bracket_description}\n\n"
             f"{gc_block}"
+            f"{budget_block}"
             f"User's deck concept / prompt (PRIMARY DIRECTION - build around this):\n"
             f"{concept}\n\n"
             f"Here is a current list of banned cards. DO NOT include any of these cards at all:\n{json.dumps(list(banned_list or []))}\n\n"
