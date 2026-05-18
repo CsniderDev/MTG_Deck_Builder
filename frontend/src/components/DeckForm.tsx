@@ -25,15 +25,16 @@ export default function DeckForm({ onSubmit, loading, initial }: DeckFormProps):
   const [commander, setCommander] = useState<string>(initial?.commander ?? '');
   const [bracket, setBracket] = useState<BracketLevel>(initial?.bracket ?? 2);
   const [prompt, setPrompt] = useState<string>(initial?.prompt ?? '');
-  const [bannedList, setBannedList] = useState<string[]>(initial?.banned_list ?? []);
-  const [gamechangers, setGamechangers] = useState<string[]>(initial?.gamechangers ?? []);
+
 
   function handleSubmit(event: React.FormEvent<HTMLFormElement>): void {
-    setBannedList(localStorage.getItem('mtg_banned_list') ? JSON.parse(localStorage.getItem('mtg_banned_list') as string) : []);
-    setGamechangers(localStorage.getItem('mtg_gamechangers') ? JSON.parse(localStorage.getItem('mtg_gamechangers') as string) : []);
     event.preventDefault();
     if (!commander.trim()) return;
-    onSubmit({ commander: commander.trim(), bracket, prompt: prompt.trim(), gamechangers, banned_list: bannedList });
+    const gamechangers = localStorage.getItem('mtg_gamechangers');
+    const bannedList = localStorage.getItem('mtg_banned_list');
+    const gamechangersState = gamechangers ? JSON.parse(gamechangers) : [];
+    const bannedListState = bannedList ? JSON.parse(bannedList) : [];
+    onSubmit({ commander: commander.trim(), bracket, prompt: prompt.trim(), gamechangers: gamechangersState, banned_list: bannedListState });
   }
 
   return (
@@ -64,8 +65,8 @@ export default function DeckForm({ onSubmit, loading, initial }: DeckFormProps):
 
       <label className="field">
         <span>Deck concept / prompt</span>
-        <textarea
-          rows={5}
+        <input
+          type="text"
           value={prompt}
           onChange={(e) => setPrompt(e.target.value)}
           placeholder="Describe the deck you want. e.g. 'Superfriends with proliferate, lean into +1/+1 counters, avoid infinite combos, budget under $300.'"

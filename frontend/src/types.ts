@@ -76,6 +76,7 @@ export interface MagicCard {
   scryfall_id?: string;
   type_line?: string;
   oracle_text?: string;
+  price?: string;
   mana_cost?: string;
   colors?: string[];
   color_identity?: string[];

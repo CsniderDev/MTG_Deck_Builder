@@ -41,6 +41,7 @@ class MagicCard(BaseModel):
     mana_cost: Optional[str] = None
     type_line: Optional[str] = None
     oracle_text: Optional[str] = None
+    price: Optional[str] = None
     colors: list[str] = Field(default_factory=list)
     color_identity: list[str] = Field(default_factory=list)
     image_uris: Optional[ScryfallImageUris] = None

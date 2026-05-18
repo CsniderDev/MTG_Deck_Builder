@@ -281,6 +281,7 @@ class DeckBuilder:
             deck_card.mana_cost = data.get("mana_cost") or deck_card.mana_cost
             deck_card.type_line = data.get("type_line") or deck_card.type_line
             deck_card.oracle_text = data.get("oracle_text") or deck_card.oracle_text
+            deck_card.price = data.get("prices", {}).get("usd") or deck_card.price
             deck_card.colors = data.get("colors") or deck_card.colors
             deck_card.color_identity = data.get("color_identity") or deck_card.color_identity
             deck_card.image_uris = _to_image_uris(data.get("image_uris")) or deck_card.image_uris
@@ -297,6 +298,7 @@ def _to_card(card: dict[str, Any]) -> MagicCard:
         mana_cost=card.get("mana_cost"),
         type_line=card.get("type_line"),
         oracle_text=card.get("oracle_text"),
+        price=card.get("prices", {}).get("usd"),
         colors=card.get("colors") or [],
         color_identity=card.get("color_identity") or [],
         image_uris=_to_image_uris(card.get("image_uris")),

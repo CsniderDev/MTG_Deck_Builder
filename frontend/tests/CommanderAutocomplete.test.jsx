@@ -117,4 +117,31 @@ describe('CommanderAutocomplete', () => {
     });
     expect(screen.queryByRole('listbox')).not.toBeInTheDocument();
   });
+
+  it('does not reopen stale suggestions after the input is cleared', async () => {
+    let resolveFetch;
+    vi.spyOn(globalThis, 'fetch').mockImplementation((_input, init) => new Promise((resolve, reject) => {
+      resolveFetch = () => resolve(jsonResponse({ suggestions: ["Atraxa, Praetors' Voice"] }));
+      init?.signal?.addEventListener('abort', () => reject(new DOMException('Aborted', 'AbortError')));
+    }));
+
+    const user = userEvent.setup();
+    render(<Wrapper />);
+    const input = screen.getByRole('combobox');
+
+    await user.type(input, 'atra');
+    await act(async () => {
+      await new Promise((r) => setTimeout(r, 300));
+    });
+
+    await user.clear(input);
+    await act(async () => {
+      resolveFetch?.();
+      await Promise.resolve();
+    });
+
+    expect(input).toHaveValue('');
+    expect(screen.queryByRole('listbox')).not.toBeInTheDocument();
+    expect(screen.queryByText("Atraxa, Praetors' Voice")).not.toBeInTheDocument();
+  });
 });

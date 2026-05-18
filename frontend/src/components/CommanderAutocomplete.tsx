@@ -27,6 +27,7 @@ export default function CommanderAutocomplete({
   const abortRef = useRef<AbortController | null>(null);
   const debounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const skipNextFetchRef = useRef<boolean>(false);
+  const requestSeqRef = useRef<number>(0);
 
   useEffect(() => {
     if (skipNextFetchRef.current) {
@@ -34,30 +35,41 @@ export default function CommanderAutocomplete({
       return undefined;
     }
     if (debounceRef.current) clearTimeout(debounceRef.current);
+    if (abortRef.current) {
+      abortRef.current.abort();
+      abortRef.current = null;
+    }
     const trimmed = (value || '').trim();
     if (trimmed.length < MIN_QUERY) {
       setSuggestions([]);
       setOpen(false);
       setActiveIndex(-1);
+      setLoading(false);
       return undefined;
     }
     debounceRef.current = setTimeout(async () => {
-      if (abortRef.current) abortRef.current.abort();
       const controller = new AbortController();
+      const requestSeq = requestSeqRef.current + 1;
+      requestSeqRef.current = requestSeq;
       abortRef.current = controller;
       setLoading(true);
       try {
         const names = await autocompleteCommanders(trimmed, { signal: controller.signal });
+        if (controller.signal.aborted || requestSeq !== requestSeqRef.current) return;
         setSuggestions(names);
         setOpen(names.length > 0);
         setActiveIndex(-1);
       } catch (err) {
+        if (controller.signal.aborted || requestSeq !== requestSeqRef.current) return;
         if (!(err instanceof DOMException) || err.name !== 'AbortError') {
           setSuggestions([]);
           setOpen(false);
         }
       } finally {
-        setLoading(false);
+        if (!controller.signal.aborted && requestSeq === requestSeqRef.current) {
+          setLoading(false);
+          abortRef.current = null;
+        }
       }
     }, DEBOUNCE_MS);
     return () => {
@@ -66,7 +78,13 @@ export default function CommanderAutocomplete({
   }, [value]);
 
   function pick(name: string): void {
+    if (debounceRef.current) clearTimeout(debounceRef.current);
+    if (abortRef.current) {
+      abortRef.current.abort();
+      abortRef.current = null;
+    }
     skipNextFetchRef.current = true;
+    setLoading(false);
     onChange(name);
     setSuggestions([]);
     setOpen(false);

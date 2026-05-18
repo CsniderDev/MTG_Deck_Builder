@@ -44,6 +44,15 @@ export default function DeckResult({
     }
   }
 
+  function getSumOfCardPrices(): number {
+    return deck.decklist.reduce((sum, card) => {
+      const price = parseFloat((card as any).price || '0'); // Type assertion to access price
+      return sum + (price * (card.count || 1));
+    }, 0);
+  }
+
+  const totalPrice = useMemo(() => getSumOfCardPrices(), [deck]);
+
   function handleRevampSubmit(event: React.FormEvent<HTMLFormElement>): void {
     event.preventDefault();
     if (!changeRequest.trim()) return;
@@ -89,6 +98,9 @@ export default function DeckResult({
           ))}
         </ul>
       )}
+      <p className="muted">
+        Total price: ${totalPrice.toFixed(2)}
+      </p>
 
       <div className="deck-result__body">
         <div className="deck-list">
@@ -119,8 +131,8 @@ export default function DeckResult({
 
           <h3>Revamp this deck</h3>
           <form onSubmit={handleRevampSubmit}>
-            <textarea
-              rows={4}
+            <input             
+              type="text"
               value={changeRequest}
               onChange={(e) => setChangeRequest(e.target.value)}
               placeholder="e.g. 'Swap out the infinite combos, add more board wipes, lower the curve.'"

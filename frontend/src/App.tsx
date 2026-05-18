@@ -94,7 +94,7 @@ export default function App(): React.ReactElement {
       </header>
 
       <main className="app__main">
-        <DeckForm onSubmit={handleBuild} loading={loading} initial={formState} />
+        <DeckForm onSubmit={handleBuild} loading={loading} initial={formState}  />
         {error && <div className="error">{error}</div>}
         {deck && <DeckResult deck={deck} onRevamp={handleRevamp} revamping={revamping} />}
       </main>
