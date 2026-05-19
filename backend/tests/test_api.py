@@ -61,6 +61,27 @@ class _StubScryfall:
     async def getGamechangers(self) -> list[str]:
         return ["Rhystic Study", "Smothering Tithe"]
 
+    async def get_card(self, name: str) -> dict[str, Any]:
+        return {
+            "id": f"id-{name.lower().replace(' ', '-')}",
+            "name": name,
+            "type_line": "Legendary Creature - Test",
+            "oracle_text": "Partner (You can have two commanders if both have partner.)",
+            "legalities": {"commander": "legal"},
+            "color_identity": ["W", "U"],
+            "image_uris": {"normal": f"https://img.test/{name.lower().replace(' ', '-')}.jpg"},
+        }
+
+    async def get_commander_companion_options(self, name: str) -> dict[str, Any]:
+        if "tymna" in name.lower():
+            return {
+                "primary_name": "Tymna the Weaver",
+                "relationship": "Partner",
+                "secondary_kind": "commander",
+                "options": ["Thrasios, Triton Hero", "Kraum, Ludevic's Opus"],
+            }
+        return {"primary_name": name, "relationship": None, "secondary_kind": None, "options": []}
+
     async def aclose(self):
         pass
 
@@ -193,6 +214,17 @@ def test_autocomplete_endpoint_returns_empty_when_no_matches(client):
 def test_autocomplete_endpoint_requires_query(client):
     response = client.get("/api/cards/autocomplete", params={"q": ""})
     assert response.status_code == 422
+
+
+def test_commander_options_endpoint_returns_partner_choices(client):
+    response = client.get("/api/cards/commander-options", params={"q": "Tymna the Weaver"})
+    assert response.status_code == 200
+    assert response.json() == {
+        "primary_name": "Tymna the Weaver",
+        "relationship": "Partner",
+        "secondary_kind": "commander",
+        "options": ["Thrasios, Triton Hero", "Kraum, Ludevic's Opus"],
+    }
 
 
 def test_revamp_endpoint_success(client):

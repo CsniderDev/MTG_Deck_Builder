@@ -198,3 +198,44 @@ async def test_get_collection_caches_cards_across_calls():
     assert [card["name"] for card in cards] == ["Sol Ring", "Arcane Signet"]
     assert [card["name"] for card in again] == ["Sol Ring"]
     assert route.call_count == 1
+
+
+@pytest.mark.asyncio
+async def test_get_commander_companion_options_returns_partner_choices():
+    tymna = {
+        "name": "Tymna the Weaver",
+        "type_line": "Legendary Creature - Human Cleric",
+        "oracle_text": "Partner (You can have two commanders if both have partner.)",
+        "legalities": {"commander": "legal"},
+        "color_identity": ["W", "B"],
+    }
+    partner_search = {
+        "data": [
+            tymna,
+            {
+                "name": "Thrasios, Triton Hero",
+                "type_line": "Legendary Creature - Merfolk Wizard",
+                "oracle_text": "Partner (You can have two commanders if both have partner.)",
+                "legalities": {"commander": "legal"},
+                "color_identity": ["G", "U"],
+            },
+            {
+                "name": "Frodo, Adventurous Hobbit",
+                "type_line": "Legendary Creature - Halfling Scout",
+                "oracle_text": "Partner—Friends forever",
+                "legalities": {"commander": "legal"},
+                "color_identity": ["W"],
+            },
+        ]
+    }
+    with respx.mock(base_url="https://api.scryfall.com") as router:
+        router.get("/cards/named").mock(return_value=httpx.Response(200, json=tymna))
+        router.get("/cards/search").mock(return_value=httpx.Response(200, json=partner_search))
+        client = ScryfallClient()
+        try:
+            payload = await client.get_commander_companion_options("Tymna the Weaver")
+        finally:
+            await client.aclose()
+    assert payload["relationship"] == "Partner"
+    assert payload["secondary_kind"] == "commander"
+    assert payload["options"] == ["Thrasios, Triton Hero"]

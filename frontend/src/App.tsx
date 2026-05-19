@@ -16,9 +16,9 @@ type DeckSession =
   | { mode: 'build'; values: BuildDeckPayload }
   | { mode: 'existing'; values: ExistingDeckActionPayload };
 
-function parseDecklistText(decklistText: string, commanderName: string): MagicCard[] {
+function parseDecklistText(decklistText: string, commanderNames: string[]): MagicCard[] {
   /** Parse a pasted text decklist into API-ready card rows while removing the commander line. */
-  const commanderKey = commanderName.trim().toLowerCase();
+  const commanderKeys = commanderNames.map((name) => name.trim().toLowerCase()).filter(Boolean);
   const cards: MagicCard[] = [];
   for (const rawLine of decklistText.split(/\r?\n/)) {
     const line = rawLine.trim();
@@ -30,10 +30,11 @@ function parseDecklistText(decklistText: string, commanderName: string): MagicCa
     const count = Number(match[1]);
     const name = match[2].trim();
     const normalizedName = name.toLowerCase();
-    const isCommanderLine =
+    const isCommanderLine = commanderKeys.some((commanderKey) => (
       normalizedName === commanderKey ||
       normalizedName.includes(commanderKey) ||
-      commanderKey.includes(normalizedName);
+      commanderKey.includes(normalizedName)
+    ));
     if (!name || isCommanderLine) continue;
     cards.push({ name, count: Number.isFinite(count) && count > 0 ? count : 1 });
   }
@@ -75,10 +76,6 @@ export default function App(): React.ReactElement {
       setBannedList(bannedList);
       setGamechangers(gamechangers);
     }
-
-    console.log('gamechangers:', gamechangers);
-    console.log('banned list:', bannedList);
-
     fetchHealth()
       .then(setHealth)
       .catch(() => setHealth({ status: 'unreachable', llm_enabled: false }));
@@ -106,9 +103,11 @@ export default function App(): React.ReactElement {
     setError('');
     setExistingFormState(values);
     try {
-      const previousDecklist = parseDecklistText(values.decklist_text, values.commander);
+      const commanderNames = [values.commander, values.secondary_commander || ''];
+      const previousDecklist = parseDecklistText(values.decklist_text, commanderNames);
       const result = await revampDeck({
         commander: values.commander,
+        secondary_commander: values.secondary_commander,
         bracket: values.bracket,
         prompt: values.prompt,
         gamechangers: values.gamechangers,
@@ -143,6 +142,7 @@ export default function App(): React.ReactElement {
     try {
       const basePayload = {
         commander: session.values.commander,
+        secondary_commander: session.values.secondary_commander,
         bracket: session.values.bracket,
         prompt: session.values.prompt,
         gamechangers,

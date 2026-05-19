@@ -12,6 +12,7 @@ from .models.schemas import (
     AutocompleteResponse,
     BannedListResponse,
     BuildDeckRequest,
+    CommanderCompanionOptionsResponse,
     DeckResponse,
     GamechangersResponse,
     RevampDeckRequest,
@@ -91,6 +92,18 @@ async def autocomplete_cards(
         q, commander_only=commander_only
     )
     return AutocompleteResponse(suggestions=suggestions)
+
+
+@app.get("/api/cards/commander-options", response_model=CommanderCompanionOptionsResponse)
+async def commander_companion_options(
+    q: str = Query(..., min_length=1, max_length=200),
+) -> CommanderCompanionOptionsResponse:
+    """Return compatible partner/background-style options for a selected commander."""
+    try:
+        payload = await app.state.scryfall.get_commander_companion_options(q)
+    except Exception:
+        payload = {"primary_name": q, "relationship": None, "secondary_kind": None, "options": []}
+    return CommanderCompanionOptionsResponse.model_validate(payload)
 
 @app.get("/api/banned", response_model=BannedListResponse)
 async def get_banned_list() -> BannedListResponse:

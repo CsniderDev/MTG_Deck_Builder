@@ -2,6 +2,7 @@ import type {
   AutocompleteResponse,
   BannedListResponse,
   BuildDeckPayload,
+  CommanderCompanionOptionsResponse,
   DeckResponse,
   GamechangersResponse,
   HealthStatus,
@@ -24,8 +25,7 @@ async function postJson<T>(path: string, body: unknown): Promise<T> {
 
 export function buildDeck(payload: BuildDeckPayload): Promise<DeckResponse> {
   /** Request a brand-new deck build from the backend. */
-  const { commander, bracket, prompt, gamechangers, banned_list } = payload;
-  return postJson<DeckResponse>('/api/decks/build', { commander, bracket, prompt, gamechangers, banned_list });
+  return postJson<DeckResponse>('/api/decks/build', payload);
 }
 
 export function revampDeck(payload: RevampDeckPayload): Promise<DeckResponse> {
@@ -85,4 +85,18 @@ export async function autocompleteCommanders(
   }
   const body = (await response.json()) as AutocompleteResponse;
   return body.suggestions || [];
+}
+
+export async function fetchCommanderCompanionOptions(
+  commander: string,
+  { signal }: { signal?: AbortSignal } = {},
+): Promise<CommanderCompanionOptionsResponse> {
+  /** Fetch valid secondary commander/background options for a selected commander. */
+  const params = new URLSearchParams({ q: commander });
+  const response = await fetch(`/api/cards/commander-options?${params.toString()}`, { signal });
+  if (!response.ok) {
+    const detail = (await response.json().catch(() => ({}))) as { detail?: string };
+    throw new Error(detail.detail || `Commander options failed with status ${response.status}`);
+  }
+  return (await response.json()) as CommanderCompanionOptionsResponse;
 }

@@ -33,6 +33,26 @@ MONOR = {
     "image_uris": {"normal": "https://img.test/krenko-normal.jpg"},
 }
 
+TYMNA = {
+    "id": "tymna-1",
+    "name": "Tymna the Weaver",
+    "type_line": "Legendary Creature - Human Cleric",
+    "oracle_text": "Lifelink\nAt the beginning of your postcombat main phase...\nPartner (You can have two commanders if both have partner.)",
+    "legalities": {"commander": "legal"},
+    "color_identity": ["W", "B"],
+    "image_uris": {"normal": "https://img.test/tymna.jpg"},
+}
+
+THRASIOS = {
+    "id": "thrasios-1",
+    "name": "Thrasios, Triton Hero",
+    "type_line": "Legendary Creature - Merfolk Wizard",
+    "oracle_text": "Partner (You can have two commanders if both have partner.)",
+    "legalities": {"commander": "legal"},
+    "color_identity": ["G", "U"],
+    "image_uris": {"normal": "https://img.test/thrasios.jpg"},
+}
+
 
 def test_normalize_pads_to_99_with_basics_for_atraxa():
     raw = [{"name": "Sol Ring", "count": 1, "category": "Ramp"}]
@@ -90,7 +110,51 @@ class _StubScryfall:
         self.collection_calls = 0
 
     async def resolve_commander(self, name):
+        if "tymna" in name.lower():
+            return TYMNA
         return ATRAXA
+
+    async def get_card(self, name):
+        lowered = name.lower()
+        if "thrasios" in lowered:
+            return THRASIOS
+        if "cloudsea djinn" in lowered:
+            return {
+                "id": "nyxbloom-1",
+                "name": "Nyxbloom Ancient",
+                "printed_name": "The Cloudsea Djinn",
+                "type_line": "Creature - Elemental",
+                "oracle_text": "If you tap a permanent for mana, it produces three times as much of that mana instead.",
+                "legalities": {"commander": "legal"},
+                "color_identity": ["G"],
+                "image_uris": {"normal": "https://img.test/nyxbloom.jpg"},
+            }
+        return {
+            "id": f"id-{lowered.replace(' ', '-')}",
+            "name": name,
+            "type_line": "Artifact",
+            "oracle_text": f"Rules text for {name}",
+            "mana_cost": "{1}",
+            "colors": [],
+            "color_identity": [],
+            "legalities": {"commander": "legal"},
+            "image_uris": {"normal": f"https://img.test/{lowered.replace(' ', '-')}.jpg"},
+        }
+
+    async def get_commander_companion_options(self, name):
+        if "tymna" in name.lower():
+            return {
+                "primary_name": "Tymna the Weaver",
+                "relationship": "Partner",
+                "secondary_kind": "commander",
+                "options": ["Thrasios, Triton Hero"],
+            }
+        return {
+            "primary_name": name,
+            "relationship": None,
+            "secondary_kind": None,
+            "options": [],
+        }
 
     async def get_collection(self, names):
         self.collection_calls += 1
@@ -107,6 +171,7 @@ class _StubScryfall:
                 "image_uris": {"normal": f"https://img.test/{name.lower().replace(' ', '-')}.jpg"},
             }
             for name in names
+            if "cloudsea djinn" not in name.lower()
         ]
 
     async def aclose(self):
@@ -187,6 +252,35 @@ async def test_build_with_full_llm_payload_reuses_validation_collection_for_hydr
     result = await builder.build(BuildDeckRequest(commander="Atraxa", bracket=3, prompt="combo"))
     assert result.source == "llm"
     assert scryfall.collection_calls == 1
+
+
+@pytest.mark.asyncio
+async def test_build_accepts_valid_secondary_commander_and_unions_color_identity():
+    payload = {
+        "decklist": [{"name": "Growth Spiral", "count": 1, "category": "Draw"}],
+        "explanation": "Partner plan.",
+        "substitutions": [],
+    }
+    builder = DeckBuilder(_StubScryfall(), _StubEDHRec(), _StubLLM(payload))
+    result = await builder.build(
+        BuildDeckRequest(
+            commander="Tymna the Weaver",
+            secondary_commander="Thrasios, Triton Hero",
+            bracket=3,
+            prompt="value",
+        )
+    )
+    assert result.secondary_commander is not None
+    assert result.secondary_commander.name == "Thrasios, Triton Hero"
+
+
+@pytest.mark.asyncio
+async def test_validate_decklist_accepts_alternate_printed_name_via_fuzzy_lookup():
+    builder = DeckBuilder(_StubScryfall(), _StubEDHRec(), _StubLLM())
+    valid_cards, invalid_cards = await builder.validate_decklist([{"name": "The Cloudsea Djinn"}], ["G"])
+    assert invalid_cards == []
+    assert "the cloudsea djinn" in valid_cards
+    assert valid_cards["the cloudsea djinn"]["name"] == "Nyxbloom Ancient"
 
 
 @pytest.mark.asyncio

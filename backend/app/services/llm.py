@@ -155,7 +155,10 @@ class LLMService:
             f"Produce a revised 99-card decklist applying the change request while "
             f"keeping the deck coherent and legal. For every meaningful swap, include "
             f"a substitution entry listing the removed card(s), the added card(s), and "
-            f"a concise explanation of why the substitution helps.\n\n"
+            f"a concise explanation of why the substitution helps. Treat Universes Beyond "
+            f"cards and alternate printed or reskinned names as valid whenever Scryfall "
+            f"resolves them to Commander-legal cards. Prefer official Scryfall card names "
+            f"in the final JSON when possible.\n\n"
             f"{_DECK_SCHEMA_INSTRUCTIONS}"
         )
         return await self._generate_json(prompt)
@@ -206,7 +209,9 @@ class LLMService:
             f"User's deck concept / prompt (PRIMARY DIRECTION - build around this):\n"
             f"{concept}\n\n"
             f"Here is a current list of banned cards. DO NOT include any of these cards at all:\n{json.dumps(list(banned_list or []))}\n\n"
-            f"Remember the commander's color identity is {ci}. Only include cards that share colors with the commander.\n\n"
+            f"Remember the commander's color identity is {ci}. Only include cards that share colors with the commander. "
+            f"Universes Beyond cards and cards with alternate printed names are still valid if they are Commander-legal and Scryfall-resolvable. "
+            f"Prefer official Scryfall card names in the final JSON when possible.\n\n"
             f"EDHREC recommendation pool (reference candidates only - substitute "
             f"whenever the user's concept or bracket constraints demand it):\n"
             f"{recs_block}\n\n{_DECK_SCHEMA_INSTRUCTIONS}"

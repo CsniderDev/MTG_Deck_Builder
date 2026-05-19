@@ -39,6 +39,7 @@ class MagicCard(BaseModel):
     category: Optional[str] = None
     scryfall_id: Optional[str] = None
     mana_cost: Optional[str] = None
+    produced_mana: list[str] = Field(default_factory=list)
     type_line: Optional[str] = None
     oracle_text: Optional[str] = None
     price: Optional[str] = None
@@ -56,6 +57,7 @@ class DeckSubstitution(BaseModel):
 
 class BuildDeckRequest(BaseModel):
     commander: str = Field(..., min_length=1, max_length=200)
+    secondary_commander: Optional[str] = Field(default=None, max_length=200)
     bracket: BracketLevel
     prompt: str = Field(default="", max_length=4000)
     gamechangers: list[str] = Field(default_factory=list)
@@ -64,6 +66,7 @@ class BuildDeckRequest(BaseModel):
 
 class RevampDeckRequest(BaseModel):
     commander: str
+    secondary_commander: Optional[str] = Field(default=None, max_length=200)
     bracket: BracketLevel
     prompt: str = ""
     gamechangers: list[str] = Field(default_factory=list)
@@ -76,6 +79,7 @@ class RevampDeckRequest(BaseModel):
 class DeckResponse(BaseModel):
     version: int
     commander: MagicCard
+    secondary_commander: Optional[MagicCard] = None
     bracket: BracketLevel
     bracket_description: str
     prompt: str
@@ -96,3 +100,10 @@ class BannedListResponse(BaseModel):
 
 class GamechangersResponse(BaseModel):
     gamechangers: list[str] = Field(default_factory=list)
+
+
+class CommanderCompanionOptionsResponse(BaseModel):
+    primary_name: str
+    relationship: Optional[str] = None
+    secondary_kind: Optional[Literal["commander", "background"]] = None
+    options: list[str] = Field(default_factory=list)

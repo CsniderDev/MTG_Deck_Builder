@@ -10,6 +10,8 @@ export interface CommanderAutocompleteProps {
   placeholder?: string;
   required?: boolean;
   disabled?: boolean;
+  localSuggestions?: string[];
+  commanderOnly?: boolean;
 }
 
 export default function CommanderAutocomplete({
@@ -18,6 +20,8 @@ export default function CommanderAutocomplete({
   placeholder,
   required,
   disabled,
+  localSuggestions,
+  commanderOnly = true,
 }: CommanderAutocompleteProps): React.ReactElement {
   /** Render a debounced autocomplete input for commander selection. */
   const [suggestions, setSuggestions] = useState<string[]>([]);
@@ -31,6 +35,22 @@ export default function CommanderAutocomplete({
   const requestSeqRef = useRef<number>(0);
 
   useEffect(() => {
+    const trimmed = (value || '').trim();
+    if (localSuggestions) {
+      if (debounceRef.current) clearTimeout(debounceRef.current);
+      if (abortRef.current) {
+        abortRef.current.abort();
+        abortRef.current = null;
+      }
+      const filtered = localSuggestions.filter((name) =>
+        !trimmed ? true : name.toLowerCase().includes(trimmed.toLowerCase()),
+      );
+      setSuggestions(filtered);
+      setOpen(filtered.length > 0 && !disabled);
+      setActiveIndex(-1);
+      setLoading(false);
+      return undefined;
+    }
     if (skipNextFetchRef.current) {
       skipNextFetchRef.current = false;
       return undefined;
@@ -40,7 +60,6 @@ export default function CommanderAutocomplete({
       abortRef.current.abort();
       abortRef.current = null;
     }
-    const trimmed = (value || '').trim();
     if (trimmed.length < MIN_QUERY) {
       setSuggestions([]);
       setOpen(false);
@@ -55,7 +74,10 @@ export default function CommanderAutocomplete({
       abortRef.current = controller;
       setLoading(true);
       try {
-        const names = await autocompleteCommanders(trimmed, { signal: controller.signal });
+        const names = await autocompleteCommanders(trimmed, {
+          signal: controller.signal,
+          commanderOnly,
+        });
         if (controller.signal.aborted || requestSeq !== requestSeqRef.current) return;
         setSuggestions(names);
         setOpen(names.length > 0);
@@ -76,7 +98,7 @@ export default function CommanderAutocomplete({
     return () => {
       if (debounceRef.current) clearTimeout(debounceRef.current);
     };
-  }, [value]);
+  }, [value, localSuggestions, commanderOnly, disabled]);
 
   function pick(name: string): void {
     /** Commit a selected suggestion into the input and close the dropdown. */

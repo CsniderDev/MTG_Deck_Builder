@@ -1,10 +1,14 @@
 import React, { useMemo, useState } from 'react';
 import type { DeckResponse, MagicCard } from '../types';
 import MagicCardItem from './MagicCard';
+import DeckStats from './DeckStats';
 
 function buildDeckText(deck: DeckResponse): string {
   /** Convert a rendered deck into a text decklist suitable for clipboard export. */
   const lines: string[] = [`1 ${deck.commander.name}`];
+  if (deck.secondary_commander) {
+    lines.push(`1 ${deck.secondary_commander.name}`);
+  }
   const grouped = new Map<string, MagicCard[]>();
   for (const card of deck.decklist) {
     const cat = card.category || 'Other';
@@ -33,8 +37,9 @@ export default function DeckResult({
   const [copied, setCopied] = useState<boolean>(false);
 
   const decklistText = useMemo(() => buildDeckText(deck), [deck]);
+  const commandZoneSize = deck.secondary_commander ? 2 : 1;
   const totalCards =
-    deck.decklist.reduce((sum, c) => sum + (c.count || 1), 0) + 1; // +1 commander
+    deck.decklist.reduce((sum, c) => sum + (c.count || 1), 0) + commandZoneSize;
 
   async function handleCopy(): Promise<void> {
     /** Copy the current decklist text to the clipboard and flash success state. */
@@ -46,16 +51,6 @@ export default function DeckResult({
       setCopied(false);
     }
   }
-
-  function getSumOfCardPrices(): number {
-    /** Sum the hydrated card prices to produce a rough deck cost estimate. */
-    return deck.decklist.reduce((sum, card) => {
-      const price = parseFloat((card as any).price || '0'); // Type assertion to access price
-      return sum + (price * (card.count || 1));
-    }, 0);
-  }
-
-  const totalPrice = useMemo(() => getSumOfCardPrices(), [deck]);
 
   function handleRevampSubmit(event: React.FormEvent<HTMLFormElement>): void {
     /** Submit the inline revamp request and clear the text field afterward. */
@@ -77,7 +72,8 @@ export default function DeckResult({
       <header className="deck-result__header">
         <div className="commander-header">
           <h2>
-            {deck.commander.name} <span className="badge">v{deck.version}</span>
+            {deck.secondary_commander ? `${deck.commander.name} + ${deck.secondary_commander.name}` : deck.commander.name}{' '}
+            <span className="badge">v{deck.version}</span>
           </h2>
 
           <p className="muted">
@@ -87,25 +83,26 @@ export default function DeckResult({
             {totalCards} cards total - source: {deck.source}
           </p>
 
-          <div className="commander-image">
-            <MagicCardItem
-              card={deck.commander as MagicCard}
-              disableHover={true}
-            />
+          <div className="commander-showcase">
+            <div className="commander-image">
+              <MagicCardItem
+                card={deck.commander as MagicCard}
+                disableHover={true}
+              />
+            </div>
+            {deck.secondary_commander && (
+              <div className="commander-image commander-image--secondary">
+                <MagicCardItem
+                  card={deck.secondary_commander as MagicCard}
+                  disableHover={true}
+                />
+              </div>
+            )}
           </div>
         </div>
       </header>
 
-      {deck.notes?.length > 0 && (
-        <ul className="notes">
-          {deck.notes.map((note, idx) => (
-            <li key={idx}>{note}</li>
-          ))}
-        </ul>
-      )}
-      <p className="muted">
-        Total price: ${totalPrice.toFixed(2)}
-      </p>
+      <DeckStats deck={deck} />
 
       <div className="deck-result__body">
         <div className="deck-list">

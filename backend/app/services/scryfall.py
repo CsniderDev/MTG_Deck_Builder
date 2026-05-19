@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import re
 from typing import Any, Optional
 
 import httpx
@@ -15,10 +16,36 @@ from ..config import get_settings
 
 
 _REQUEST_DELAY = 0.075  # Scryfall asks for 50-100ms between calls.
+_PARTNER_WITH_RE = re.compile(r"partner with\s+([^\n(]+)", re.IGNORECASE)
+_PARTNER_VARIANT_RE = re.compile(r"partner[—-]\s*([^\n(]+)", re.IGNORECASE)
 
 
 class ScryfallError(RuntimeError):
     pass
+
+
+def _normalized_text(text: str) -> str:
+    return " ".join(text.replace("—", "-").lower().split())
+
+
+def _is_background_card(card: dict[str, Any]) -> bool:
+    return "background" in (card.get("type_line") or "").lower()
+
+
+def _commander_pairing_mode(card: dict[str, Any]) -> tuple[Optional[str], Optional[str]]:
+    oracle_text = card.get("oracle_text") or ""
+    lower_text = oracle_text.lower()
+    if partner_with := _PARTNER_WITH_RE.search(oracle_text):
+        return "partner_with", partner_with.group(1).strip()
+    if "choose a background" in lower_text:
+        return "background", None
+    if "doctor's companion" in lower_text:
+        return "doctor", None
+    if variant_match := _PARTNER_VARIANT_RE.search(oracle_text):
+        return "variant", _normalized_text(variant_match.group(1))
+    if re.search(r"\bpartner\b", lower_text):
+        return "partner", None
+    return None, None
 
 
 class ScryfallClient:
@@ -126,6 +153,60 @@ class ScryfallClient:
             return []
         return list((data.get("data") or [])[:limit])
 
+    async def get_commander_companion_options(self, name: str) -> dict[str, Any]:
+        """Return compatible secondary commander/background choices for a commander."""
+        card = await self.named(name, fuzzy=True)
+        mode, detail = _commander_pairing_mode(card)
+        card_name = card.get("name") or name
+        if mode == "partner_with" and detail:
+            return {
+                "primary_name": card_name,
+                "relationship": "Partner with",
+                "secondary_kind": "commander",
+                "options": [detail],
+            }
+        if mode == "background":
+            options = await self._search_card_names("t:background legal:commander", exclude_name=card_name)
+            return {
+                "primary_name": card_name,
+                "relationship": "Background",
+                "secondary_kind": "background",
+                "options": options,
+            }
+        if mode == "doctor":
+            options = await self._search_card_names("t:doctor is:commander legal:commander", exclude_name=card_name)
+            return {
+                "primary_name": card_name,
+                "relationship": "Doctor's companion",
+                "secondary_kind": "commander",
+                "options": options,
+            }
+        if mode in {"partner", "variant"}:
+            partners = await self._search_cards("is:partner legal:commander")
+            options: list[str] = []
+            for candidate in partners:
+                candidate_name = candidate.get("name")
+                if not candidate_name or candidate_name == card_name:
+                    continue
+                candidate_mode, candidate_detail = _commander_pairing_mode(candidate)
+                if mode == "partner" and candidate_mode == "partner":
+                    options.append(candidate_name)
+                elif mode == "variant" and candidate_mode == "variant" and candidate_detail == detail:
+                    options.append(candidate_name)
+            relationship = "Partner" if mode == "partner" else f"Partner — {detail.title() if detail else 'Variant'}"
+            return {
+                "primary_name": card_name,
+                "relationship": relationship,
+                "secondary_kind": "commander",
+                "options": sorted(options),
+            }
+        return {
+            "primary_name": card_name,
+            "relationship": None,
+            "secondary_kind": None,
+            "options": [],
+        }
+
 
     async def getBannedList(
         self
@@ -208,6 +289,36 @@ class ScryfallClient:
             for name in unique_names
             if name.lower() in self._collection_cache
         ]
+
+    async def _search_cards(self, query: str) -> list[dict[str, Any]]:
+        """Run a Scryfall search query and return the first page of unique cards."""
+        data = await self._get(
+            "/cards/search",
+            {
+                "q": query,
+                "order": "name",
+                "unique": "cards",
+            },
+        )
+        return list(data.get("data") or [])
+
+    async def _search_card_names(self, query: str, exclude_name: Optional[str] = None) -> list[str]:
+        """Run a Scryfall search query and return de-duplicated card names."""
+        try:
+            cards = await self._search_cards(query)
+        except ScryfallError:
+            return []
+        excluded = (exclude_name or "").strip().lower()
+        seen: list[str] = []
+        for card in cards:
+            card_name = card.get("name")
+            if not card_name:
+                continue
+            if card_name.lower() == excluded:
+                continue
+            if card_name not in seen:
+                seen.append(card_name)
+        return seen
 
     async def _post(self, path: str, json_data: dict) -> dict:
         """Perform a rate-limited POST request against the Scryfall API."""

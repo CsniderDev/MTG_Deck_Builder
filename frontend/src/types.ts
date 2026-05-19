@@ -13,6 +13,7 @@ export type DeckFormMode = 'build' | 'existing';
 export interface DeckResponse {
   version: number;
   commander: MagicCard;
+  secondary_commander?: MagicCard;
   bracket: BracketLevel;
   bracket_description: string;
   prompt: string;
@@ -31,6 +32,7 @@ export interface DeckSubstitution {
 
 export interface BuildDeckPayload {
   commander: string;
+  secondary_commander?: string;
   bracket: BracketLevel;
   prompt: string;
   gamechangers: string[];
@@ -50,6 +52,13 @@ export interface RevampDeckPayload extends BuildDeckPayload {
 export interface HealthStatus {
   status: string;
   llm_enabled: boolean;
+}
+
+export interface CommanderCompanionOptionsResponse {
+  primary_name: string;
+  relationship?: string | null;
+  secondary_kind?: 'commander' | 'background' | null;
+  options: string[];
 }
 
 export interface BannedListResponse {
@@ -91,6 +100,7 @@ export interface MagicCard {
   oracle_text?: string;
   price?: string;
   mana_cost?: string;
+  produced_mana?: string[];
   colors?: string[];
   color_identity?: string[];
   image_uris?: ScryfallImageUris;

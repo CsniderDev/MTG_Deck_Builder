@@ -1,5 +1,6 @@
 import React, { useEffect, useState } from 'react';
 import CommanderAutocomplete from './CommanderAutocomplete';
+import { fetchCommanderCompanionOptions } from '../api';
 import type { BracketLevel, BuildDeckPayload, DeckFormMode, ExistingDeckActionPayload } from '../types';
 
 interface BracketOption {
@@ -29,13 +30,45 @@ export default function DeckForm({ mode = 'build', onSubmit, loading, initial }:
   const [bracket, setBracket] = useState<BracketLevel>(initial?.bracket ?? 2);
   const [prompt, setPrompt] = useState<string>(initial?.prompt ?? '');
   const [decklistText, setDecklistText] = useState<string>(initial?.decklist_text ?? '');
+  const [secondaryCommander, setSecondaryCommander] = useState<string>(initial?.secondary_commander ?? '');
+  const [secondaryLabel, setSecondaryLabel] = useState<string>('');
+  const [secondaryOptions, setSecondaryOptions] = useState<string[]>([]);
 
   useEffect(() => {
     setCommander(initial?.commander ?? '');
     setBracket(initial?.bracket ?? 2);
     setPrompt(initial?.prompt ?? '');
     setDecklistText(initial?.decklist_text ?? '');
+    setSecondaryCommander(initial?.secondary_commander ?? '');
   }, [initial, mode]);
+
+  useEffect(() => {
+    const trimmedCommander = commander.trim();
+    if (trimmedCommander.length < 2) {
+      setSecondaryCommander('');
+      setSecondaryLabel('');
+      setSecondaryOptions([]);
+      return undefined;
+    }
+
+    const controller = new AbortController();
+    fetchCommanderCompanionOptions(trimmedCommander, { signal: controller.signal })
+      .then((payload) => {
+        if (controller.signal.aborted) return;
+        const options = payload.options || [];
+        setSecondaryLabel(payload.relationship || 'Secondary commander');
+        setSecondaryOptions(options);
+        setSecondaryCommander((current) => (current && options.includes(current) ? current : ''));
+      })
+      .catch(() => {
+        if (controller.signal.aborted) return;
+        setSecondaryCommander('');
+        setSecondaryLabel('');
+        setSecondaryOptions([]);
+      });
+
+    return () => controller.abort();
+  }, [commander]);
 
 
   function handleSubmit(event: React.FormEvent<HTMLFormElement>): void {
@@ -49,6 +82,7 @@ export default function DeckForm({ mode = 'build', onSubmit, loading, initial }:
     const bannedListState = bannedList ? JSON.parse(bannedList) : [];
     const commonValues = {
       commander: commander.trim(),
+      secondary_commander: secondaryCommander.trim() || undefined,
       bracket,
       prompt: prompt.trim(),
       gamechangers: gamechangersState,
@@ -86,6 +120,19 @@ export default function DeckForm({ mode = 'build', onSubmit, loading, initial }:
           ))}
         </select>
       </label>
+
+      {secondaryOptions.length > 0 && (
+        <label className="field">
+          <span>{secondaryLabel || 'Secondary commander / background'}</span>
+          <CommanderAutocomplete
+            value={secondaryCommander}
+            onChange={setSecondaryCommander}
+            placeholder={`Select a valid ${secondaryLabel.toLowerCase() || 'option'}`}
+            localSuggestions={secondaryOptions}
+            commanderOnly={false}
+          />
+        </label>
+      )}
 
       <label className="field">
         <span>{isExistingMode ? 'What should the AI do to this deck?' : 'Deck concept / prompt'}</span>
