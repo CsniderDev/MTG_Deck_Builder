@@ -1,6 +1,6 @@
-import React, { useState } from 'react';
+import React, { useEffect, useState } from 'react';
 import CommanderAutocomplete from './CommanderAutocomplete';
-import type { BracketLevel, BuildDeckPayload } from '../types';
+import type { BracketLevel, BuildDeckPayload, DeckFormMode, ExistingDeckActionPayload } from '../types';
 
 interface BracketOption {
   value: BracketLevel;
@@ -16,25 +16,49 @@ const BRACKETS: ReadonlyArray<BracketOption> = [
 ];
 
 export interface DeckFormProps {
-  onSubmit: (values: BuildDeckPayload) => void;
+  mode?: DeckFormMode;
+  onSubmit: (values: BuildDeckPayload | ExistingDeckActionPayload) => void;
   loading?: boolean;
-  initial?: BuildDeckPayload | null;
+  initial?: Partial<ExistingDeckActionPayload> | null;
 }
 
-export default function DeckForm({ onSubmit, loading, initial }: DeckFormProps): React.ReactElement {
+export default function DeckForm({ mode = 'build', onSubmit, loading, initial }: DeckFormProps): React.ReactElement {
+  /** Render the shared deck form for both new builds and imported-deck revisions. */
+  const isExistingMode = mode === 'existing';
   const [commander, setCommander] = useState<string>(initial?.commander ?? '');
   const [bracket, setBracket] = useState<BracketLevel>(initial?.bracket ?? 2);
   const [prompt, setPrompt] = useState<string>(initial?.prompt ?? '');
+  const [decklistText, setDecklistText] = useState<string>(initial?.decklist_text ?? '');
+
+  useEffect(() => {
+    setCommander(initial?.commander ?? '');
+    setBracket(initial?.bracket ?? 2);
+    setPrompt(initial?.prompt ?? '');
+    setDecklistText(initial?.decklist_text ?? '');
+  }, [initial, mode]);
 
 
   function handleSubmit(event: React.FormEvent<HTMLFormElement>): void {
+    /** Package the form values into the correct payload for the active workflow. */
     event.preventDefault();
     if (!commander.trim()) return;
+    if (isExistingMode && (!prompt.trim() || !decklistText.trim())) return;
     const gamechangers = localStorage.getItem('mtg_gamechangers');
     const bannedList = localStorage.getItem('mtg_banned_list');
     const gamechangersState = gamechangers ? JSON.parse(gamechangers) : [];
     const bannedListState = bannedList ? JSON.parse(bannedList) : [];
-    onSubmit({ commander: commander.trim(), bracket, prompt: prompt.trim(), gamechangers: gamechangersState, banned_list: bannedListState });
+    const commonValues = {
+      commander: commander.trim(),
+      bracket,
+      prompt: prompt.trim(),
+      gamechangers: gamechangersState,
+      banned_list: bannedListState,
+    };
+    if (isExistingMode) {
+      onSubmit({ ...commonValues, decklist_text: decklistText.trim() });
+      return;
+    }
+    onSubmit(commonValues);
   }
 
   return (
@@ -64,17 +88,37 @@ export default function DeckForm({ onSubmit, loading, initial }: DeckFormProps):
       </label>
 
       <label className="field">
-        <span>Deck concept / prompt</span>
-        <input
-          type="text"
+        <span>{isExistingMode ? 'What should the AI do to this deck?' : 'Deck concept / prompt'}</span>
+        <textarea
+          rows={isExistingMode ? 4 : 5}
           value={prompt}
           onChange={(e) => setPrompt(e.target.value)}
-          placeholder="Describe the deck you want. e.g. 'Superfriends with proliferate, lean into +1/+1 counters, avoid infinite combos, budget under $300.'"
+          placeholder={
+            isExistingMode
+              ? "e.g. 'Power this deck down to bracket 2, cut fast mana, and improve consistency on a budget.'"
+              : "Describe the deck you want. e.g. 'Superfriends with proliferate, lean into +1/+1 counters, avoid infinite combos, budget under $300.'"
+          }
         />
       </label>
 
-      <button type="submit" className="primary" disabled={loading || !commander.trim()}>
-        {loading ? 'Building deck…' : 'Build deck'}
+      {isExistingMode && (
+        <label className="field">
+          <span>Existing decklist</span>
+          <textarea
+            rows={10}
+            value={decklistText}
+            onChange={(e) => setDecklistText(e.target.value)}
+            placeholder={"Paste one card per line, e.g.\n1 Atraxa, Praetors' Voice\n1 Sol Ring\n1 Arcane Signet\n8 Forest"}
+          />
+        </label>
+      )}
+
+      <button
+        type="submit"
+        className="primary"
+        disabled={loading || !commander.trim() || (isExistingMode && (!prompt.trim() || !decklistText.trim()))}
+      >
+        {loading ? (isExistingMode ? 'Updating deck…' : 'Building deck…') : (isExistingMode ? 'Revise decklist' : 'Build deck')}
       </button>
     </form>
   );

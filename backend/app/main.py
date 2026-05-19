@@ -31,6 +31,7 @@ logging.getLogger("app").setLevel(logging.INFO)
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    """Create shared service clients for the app lifetime and close them on shutdown."""
     scryfall = ScryfallClient()
     edhrec = EDHRecClient()
     llm = LLMService()
@@ -58,11 +59,13 @@ app.add_middleware(
 
 @app.get("/api/health")
 async def health() -> dict[str, object]:
+    """Report whether the API is reachable and whether Gemini is configured."""
     return {"status": "ok", "llm_enabled": app.state.llm.enabled}
 
 
 @app.post("/api/decks/build", response_model=DeckResponse)
 async def build_deck(request: BuildDeckRequest) -> DeckResponse:
+    """Build a brand-new commander deck from a commander and optional concept prompt."""
     try:
         return await app.state.builder.build(request)
     except DeckBuilderError as exc:
@@ -71,6 +74,7 @@ async def build_deck(request: BuildDeckRequest) -> DeckResponse:
 
 @app.post("/api/decks/revamp", response_model=DeckResponse)
 async def revamp_deck(request: RevampDeckRequest) -> DeckResponse:
+    """Revise an existing decklist according to the user's requested changes."""
     try:
         return await app.state.builder.revamp(request)
     except DeckBuilderError as exc:
@@ -82,6 +86,7 @@ async def autocomplete_cards(
     q: str = Query(..., min_length=1, max_length=100),
     commander_only: bool = Query(True),
 ) -> AutocompleteResponse:
+    """Return commander-name suggestions for the autocomplete widget."""
     suggestions = await app.state.scryfall.autocomplete_commanders(
         q, commander_only=commander_only
     )
@@ -89,8 +94,10 @@ async def autocomplete_cards(
 
 @app.get("/api/banned", response_model=BannedListResponse)
 async def get_banned_list() -> BannedListResponse:
+    """Return the cached Commander banned list used by the client and prompts."""
     return BannedListResponse(banned_list=await app.state.scryfall.getBannedList())
 
 @app.get("/api/gamechangers", response_model=GamechangersResponse)
 async def get_gamechangers() -> GamechangersResponse:
+    """Return the current Commander game-changer list for bracket enforcement."""
     return GamechangersResponse(gamechangers=await app.state.scryfall.getGamechangers())

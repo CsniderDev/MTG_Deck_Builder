@@ -121,6 +121,7 @@ def test_build_endpoint_success(client):
     assert body["commander"]["name"] == "Atraxa, Praetors' Voice"
     assert body["commander"]["image_uris"]["normal"] == "https://img.test/atraxa-normal.jpg"
     assert body["source"] == "heuristic"
+    assert body["substitutions"] == []
     total = sum(c["count"] for c in body["decklist"])
     assert total == 99
     sol_ring = next(card for card in body["decklist"] if card["name"] == "Sol Ring")
@@ -209,4 +210,5 @@ def test_revamp_endpoint_success(client):
     assert response.status_code == 200, response.text
     body = response.json()
     assert body["version"] == 2
+    assert body["substitutions"] == []
     assert sum(c["count"] for c in body["decklist"]) == 99

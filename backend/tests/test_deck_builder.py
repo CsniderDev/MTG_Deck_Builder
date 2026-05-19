@@ -150,6 +150,7 @@ async def test_build_with_llm_returns_llm_source():
         + [{"name": "Sol Ring", "count": 1, "category": "Ramp"}],
         "explanation": "Test plan.",
         "notes": ["Test note."],
+        "substitutions": [],
     }
     builder = DeckBuilder(_StubScryfall(), _StubEDHRec(), _StubLLM(payload))
     result = await builder.build(BuildDeckRequest(commander="Atraxa", bracket=3, prompt="combo"))
@@ -159,6 +160,7 @@ async def test_build_with_llm_returns_llm_source():
     assert sum(c.count for c in result.decklist) == DECK_SIZE
     assert result.explanation == "Test plan."
     assert "Test note." in result.notes
+    assert result.substitutions == []
 
 
 @pytest.mark.asyncio
@@ -192,6 +194,13 @@ async def test_revamp_increments_version():
     payload = {
         "decklist": [{"name": "Sol Ring", "count": 1}],
         "explanation": "Revised.",
+        "substitutions": [
+            {
+                "removed": [{"name": "Old Card", "count": 1}],
+                "added": [{"name": "Sol Ring", "count": 1}],
+                "explanation": "Adds faster mana to accelerate the new game plan.",
+            }
+        ],
     }
     builder = DeckBuilder(_StubScryfall(), _StubEDHRec(), _StubLLM(payload))
     prev = [MagicCard(name="Old Card", count=1)]
@@ -206,6 +215,9 @@ async def test_revamp_increments_version():
     result = await builder.revamp(request)
     assert result.version == 3
     assert result.source == "llm"
+    assert result.substitutions[0].removed[0].name == "Old Card"
+    assert result.substitutions[0].added[0].name == "Sol Ring"
+    assert "faster mana" in result.substitutions[0].explanation
 
 
 @pytest.mark.asyncio

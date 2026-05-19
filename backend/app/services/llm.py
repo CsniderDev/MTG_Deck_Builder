@@ -25,7 +25,14 @@ Respond ONLY with a single JSON object, no prose, no markdown fences. Schema:
 {
   "decklist": [{"name": "<exact card name>", "count": <int>, "category": "<short label>"}],
   "explanation": "<2-4 paragraph plain-text explanation of the deck plan>",
-  "notes": ["<optional short bullet>", "..."]
+  "notes": ["<optional short bullet>", "..."],
+  "substitutions": [
+    {
+      "removed": [{"name": "<removed card>", "count": <int>}],
+      "added": [{"name": "<added card>", "count": <int>}],
+      "explanation": "<why this change improves the deck>"
+    }
+  ]
 }
 Rules:
 - The list must total exactly 99 cards (the commander is separate).
@@ -38,12 +45,16 @@ Rules:
   game-changer limit. Treat the user's deck concept as the primary direction
   for card selection - EDHREC recommendations are a candidate pool, not a
   mandate. Substitute freely to honor the concept.
+- When building from scratch, return an empty ``substitutions`` array.
+- When revising an existing deck, include a ``substitutions`` entry for each
+  meaningful card-for-card or package-for-package change, with concise reasons.
 """.strip()
 
 
 def _gamechanger_block(
     limit: Optional[int], gamechangers: Optional[Iterable[str]]
 ) -> str:
+    """Render a prompt block describing the bracket's game-changer constraint."""
     if gamechangers is None:
         return ""
     names = sorted(set(gamechangers))
@@ -71,6 +82,7 @@ def _gamechanger_block(
 
 class LLMService:
     def __init__(self) -> None:
+        """Initialize the Gemini client when an API key is configured."""
         settings = get_settings()
         self._enabled = bool(settings.gemini_api_key)
         self._model_name = settings.gemini_model
@@ -83,6 +95,7 @@ class LLMService:
 
     @property
     def enabled(self) -> bool:
+        """Report whether Gemini-backed deck generation is currently available."""
         return self._enabled
 
     async def build_deck(
@@ -96,6 +109,7 @@ class LLMService:
         gamechangers: Optional[Iterable[str]] = None,
         banned_list: Optional[Iterable[str]] = None,
     ) -> Optional[dict[str, Any]]:
+        """Ask Gemini to build a new commander deck from a commander and concept prompt."""
         if not self._enabled or self._client is None:
             return None
         prompt = self._build_prompt(
@@ -122,6 +136,7 @@ class LLMService:
         gamechangers: Optional[Iterable[str]] = None,
         banned_list: Optional[Iterable[str]] = None,
     ) -> Optional[dict[str, Any]]:
+        """Ask Gemini to revise an existing decklist and explain each substitution."""
         if not self._enabled or self._client is None:
             return None
         gc_block = _gamechanger_block(gamechanger_limit, gamechangers)
@@ -138,7 +153,10 @@ class LLMService:
             f"{gc_block}"
             f"Current decklist (99 cards, JSON):\n{json.dumps(previous_decklist)}\n\n"
             f"Produce a revised 99-card decklist applying the change request while "
-            f"keeping the deck coherent and legal.\n\n{_DECK_SCHEMA_INSTRUCTIONS}"
+            f"keeping the deck coherent and legal. For every meaningful swap, include "
+            f"a substitution entry listing the removed card(s), the added card(s), and "
+            f"a concise explanation of why the substitution helps.\n\n"
+            f"{_DECK_SCHEMA_INSTRUCTIONS}"
         )
         return await self._generate_json(prompt)
 
@@ -153,6 +171,7 @@ class LLMService:
         gamechangers: Optional[Iterable[str]] = None,
         banned_list: Optional[Iterable[str]] = None,
     ) -> str:
+        """Construct the build-from-scratch prompt sent to Gemini."""
         ci = "".join(commander.get("color_identity") or []) or "C"
         rec_lines: list[str] = []
         for header, cards in recommendations.items():
@@ -194,6 +213,7 @@ class LLMService:
         )
 
     async def _generate_json(self, prompt: str) -> Optional[dict[str, Any]]:
+        """Send a prompt to Gemini and parse the JSON-mode response."""
         if self._client is None:
             return None
         logger.info(
@@ -232,6 +252,7 @@ class LLMService:
 
     @staticmethod
     def _extract_json(text: str) -> Optional[dict[str, Any]]:
+        """Extract the first JSON object from raw model output, tolerating fences."""
         fence = re.search(r"```(?:json)?\s*(\{.*?\})\s*```", text, re.DOTALL)
         candidate = fence.group(1) if fence else text
         start = candidate.find("{")

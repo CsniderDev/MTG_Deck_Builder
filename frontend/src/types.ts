@@ -8,6 +8,8 @@ export type BracketLevel = 1 | 2 | 3 | 4 | 5;
 
 export type DeckSource = 'llm' | 'heuristic';
 
+export type DeckFormMode = 'build' | 'existing';
+
 export interface DeckResponse {
   version: number;
   commander: MagicCard;
@@ -17,7 +19,14 @@ export interface DeckResponse {
   decklist: MagicCard[];
   explanation: string;
   notes: string[];
+  substitutions: DeckSubstitution[];
   source: DeckSource;
+}
+
+export interface DeckSubstitution {
+  removed: MagicCard[];
+  added: MagicCard[];
+  explanation: string;
 }
 
 export interface BuildDeckPayload {
@@ -26,6 +35,10 @@ export interface BuildDeckPayload {
   prompt: string;
   gamechangers: string[];
   banned_list: string[];
+}
+
+export interface ExistingDeckActionPayload extends BuildDeckPayload {
+  decklist_text: string;
 }
 
 export interface RevampDeckPayload extends BuildDeckPayload {

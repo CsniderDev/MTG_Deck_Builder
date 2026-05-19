@@ -22,6 +22,7 @@ class EDHRecError(RuntimeError):
 
 
 def commander_to_slug(name: str) -> str:
+    """Convert a commander name into the EDHREC slug used by commander pages."""
     slug = name.lower().split(" //")[0]
     slug = re.sub(r"[\u2019']", "", slug)
     slug = re.sub(r"[^a-z0-9]+", "-", slug)
@@ -30,6 +31,7 @@ def commander_to_slug(name: str) -> str:
 
 class EDHRecClient:
     def __init__(self, client: Optional[httpx.AsyncClient] = None) -> None:
+        """Initialize the EDHREC client and an optional in-memory page cache."""
         settings = get_settings()
         self._base = settings.edhrec_base_url
         self._client = client or httpx.AsyncClient(
@@ -40,10 +42,12 @@ class EDHRecClient:
         self._page_cache: dict[str, dict[str, Any]] = {}
 
     async def aclose(self) -> None:
+        """Close the shared HTTP client when this instance created it."""
         if self._own_client:
             await self._client.aclose()
 
     async def commander_page(self, commander_name: str) -> dict[str, Any]:
+        """Fetch and cache the EDHREC commander page JSON for a commander name."""
         slug = commander_to_slug(commander_name)
         if slug in self._page_cache:
             return self._page_cache[slug]
@@ -59,7 +63,7 @@ class EDHRecClient:
 
     @staticmethod
     def extract_recommendations(page: dict[str, Any]) -> dict[str, list[dict[str, Any]]]:
-        """Return ``{category_header: [card_dict, ...]}`` from an EDHREC page."""
+        """Extract card recommendation groups from an EDHREC commander page payload."""
         container = page.get("container") or {}
         json_dict = container.get("json_dict") or {}
         cardlists = json_dict.get("cardlists") or []

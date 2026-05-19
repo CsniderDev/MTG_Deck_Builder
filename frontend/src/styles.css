@@ -41,6 +41,30 @@ body {
   margin: 16px 0;
 }
 
+.workflow-switch {
+  display: flex;
+  gap: 10px;
+  margin-top: 20px;
+}
+
+.workflow-switch__button {
+  background: var(--panel);
+  color: var(--text);
+  border: 1px solid var(--border);
+}
+
+.workflow-switch__button--active {
+  background: var(--accent);
+  color: #0a0c12;
+  border-color: var(--accent);
+}
+
+@media (max-width: 768px) {
+  .workflow-switch {
+    flex-direction: column;
+  }
+}
+
 .deck-form {
   background: var(--panel);
   border: 1px solid var(--border);
@@ -104,6 +128,63 @@ button.secondary { background: var(--accent-2); color: #0a0c12; }
   margin: 12px 0 0;
   color: var(--muted);
   font-size: 14px;
+}
+
+.deck-diff {
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  padding: 20px;
+  margin-top: 20px;
+}
+
+.deck-diff h3 {
+  margin: 0 0 14px;
+  font-size: 18px;
+}
+
+.deck-diff__list {
+  display: grid;
+  gap: 14px;
+}
+
+.deck-diff__item {
+  background: var(--panel-2);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 14px 16px;
+}
+
+.deck-diff__columns {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 16px;
+}
+
+.deck-diff__label {
+  margin: 0 0 6px;
+  color: var(--muted);
+  font-size: 13px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.deck-diff__cards {
+  margin: 0;
+  font-size: 15px;
+  font-weight: 600;
+}
+
+.deck-diff__reason {
+  margin: 12px 0 0;
+  color: var(--text);
+  line-height: 1.5;
+}
+
+@media (max-width: 768px) {
+  .deck-diff__columns {
+    grid-template-columns: 1fr;
+  }
 }
 
 .deck-result__body {

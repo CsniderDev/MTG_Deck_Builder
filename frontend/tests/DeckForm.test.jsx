@@ -23,6 +23,13 @@ describe('DeckForm', () => {
     expect(screen.getByRole('button', { name: /build deck/i })).toBeInTheDocument();
   });
 
+  it('renders a decklist textarea in existing-deck mode', () => {
+    render(<DeckForm mode="existing" onSubmit={() => {}} loading={false} />);
+    expect(screen.getByLabelText(/existing decklist/i)).toBeInTheDocument();
+    expect(screen.getByLabelText(/what should the ai do to this deck/i)).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: /revise decklist/i })).toBeInTheDocument();
+  });
+
   it('lists all five bracket options', () => {
     render(<DeckForm onSubmit={() => {}} loading={false} />);
     const select = screen.getByLabelText(/bracket level/i);
@@ -74,5 +81,25 @@ describe('DeckForm', () => {
     expect(screen.getByLabelText(/commander/i)).toHaveValue('Atraxa');
     expect(screen.getByLabelText(/bracket level/i)).toHaveValue('5');
     expect(screen.getByLabelText(/deck concept/i)).toHaveValue('cEDH stax');
+  });
+
+  it('submits existing-deck mode with pasted decklist text', async () => {
+    const onSubmit = vi.fn();
+    const user = userEvent.setup();
+    render(<DeckForm mode="existing" onSubmit={onSubmit} loading={false} />);
+
+    await user.type(screen.getByLabelText(/commander/i), 'Atraxa');
+    await user.type(screen.getByLabelText(/what should the ai do to this deck/i), 'power it down');
+    await user.type(screen.getByLabelText(/existing decklist/i), '1 Atraxa, Praetors\' Voice{enter}1 Sol Ring');
+    await user.click(screen.getByRole('button', { name: /revise decklist/i }));
+
+    expect(onSubmit).toHaveBeenCalledWith({
+      commander: 'Atraxa',
+      bracket: 2,
+      prompt: 'power it down',
+      gamechangers: [],
+      banned_list: [],
+      decklist_text: "1 Atraxa, Praetors' Voice\n1 Sol Ring",
+    });
   });
 });

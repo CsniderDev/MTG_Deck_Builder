@@ -37,4 +37,5 @@ GAMECHANGER_LIMITS: dict[int, int | None] = {1: 0, 2: 0, 3: 3, 4: None, 5: None}
 
 
 def gamechanger_limit(bracket: int) -> int | None:
+    """Return the maximum number of game-changers allowed for a bracket."""
     return GAMECHANGER_LIMITS.get(bracket)

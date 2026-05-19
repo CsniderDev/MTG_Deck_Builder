@@ -23,6 +23,7 @@ class ScryfallError(RuntimeError):
 
 class ScryfallClient:
     def __init__(self, client: Optional[httpx.AsyncClient] = None) -> None:
+        """Initialize the Scryfall client plus lightweight caches for repeat lookups."""
         settings = get_settings()
         self._base = settings.scryfall_base_url
         self._client = client or httpx.AsyncClient(
@@ -38,10 +39,12 @@ class ScryfallClient:
         self._gamechangers_cache: Optional[list[str]] = None
 
     async def aclose(self) -> None:
+        """Close the shared HTTP client when this instance owns it."""
         if self._own_client:
             await self._client.aclose()
 
     async def _get(self, path: str, params: Optional[dict[str, Any]] = None) -> dict[str, Any]:
+        """Perform a rate-limited GET request against the Scryfall API."""
         async with self._lock:
             await asyncio.sleep(_REQUEST_DELAY)
             response = await self._client.get(f"{self._base}{path}", params=params)
@@ -52,6 +55,7 @@ class ScryfallClient:
         return response.json()
 
     async def named(self, name: str, fuzzy: bool = True) -> dict[str, Any]:
+        """Look up a card by name, optionally using Scryfall's fuzzy matching."""
         cache_key = (name.strip().lower(), fuzzy)
         if cache_key in self._named_cache:
             return self._named_cache[cache_key]
@@ -61,6 +65,7 @@ class ScryfallClient:
         return card
 
     async def resolve_commander(self, name: str) -> dict[str, Any]:
+        """Resolve a name to a Commander-legal commander card object."""
         card = await self.named(name, fuzzy=True)
         type_line = (card.get("type_line") or "").lower()
         oracle = (card.get("oracle_text") or "").lower()
@@ -77,6 +82,7 @@ class ScryfallClient:
         return card
 
     async def get_card(self, name: str) -> Optional[dict[str, Any]]:
+        """Fetch a single card by exact name first, then fuzzy fallback if needed."""
         try:
             return await self.named(name, fuzzy=False)
         except ScryfallError:
@@ -88,6 +94,7 @@ class ScryfallClient:
     async def autocomplete_commanders(
         self, query: str, commander_only: bool = True, limit: int = 15
     ) -> list[str]:
+        """Return commander suggestions for a query using Scryfall search endpoints."""
         query = (query or "").strip()
         if not query:
             return []
@@ -123,6 +130,7 @@ class ScryfallClient:
     async def getBannedList(
         self
     ) -> list[str]:
+        """Fetch and cache the Commander banned list from Scryfall search."""
         if self._banned_list_cache is not None:
             return list(self._banned_list_cache)
         try:
@@ -151,6 +159,7 @@ class ScryfallClient:
     async def getGamechangers(
             self
     ) -> list[str]:
+        """Fetch and cache the Commander game-changer list from Scryfall search."""
         if self._gamechangers_cache is not None:
             return list(self._gamechangers_cache)
         try:
@@ -177,6 +186,7 @@ class ScryfallClient:
 
 
     async def get_collection(self, names: list[str]) -> list[dict]:
+        """Batch-fetch cards by name through ``/cards/collection`` with caching."""
         unique_names = list(dict.fromkeys(n.strip() for n in names if n and n.strip()))
         if not unique_names:
             return []
@@ -200,6 +210,7 @@ class ScryfallClient:
         ]
 
     async def _post(self, path: str, json_data: dict) -> dict:
+        """Perform a rate-limited POST request against the Scryfall API."""
         try:
             async with self._lock:
                 await asyncio.sleep(_REQUEST_DELAY)

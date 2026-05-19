@@ -19,6 +19,7 @@ export default function CommanderAutocomplete({
   required,
   disabled,
 }: CommanderAutocompleteProps): React.ReactElement {
+  /** Render a debounced autocomplete input for commander selection. */
   const [suggestions, setSuggestions] = useState<string[]>([]);
   const [open, setOpen] = useState<boolean>(false);
   const [activeIndex, setActiveIndex] = useState<number>(-1);
@@ -78,6 +79,7 @@ export default function CommanderAutocomplete({
   }, [value]);
 
   function pick(name: string): void {
+    /** Commit a selected suggestion into the input and close the dropdown. */
     if (debounceRef.current) clearTimeout(debounceRef.current);
     if (abortRef.current) {
       abortRef.current.abort();
@@ -92,6 +94,7 @@ export default function CommanderAutocomplete({
   }
 
   function handleKeyDown(event: React.KeyboardEvent<HTMLInputElement>): void {
+    /** Support keyboard navigation and selection inside the suggestion list. */
     if (event.key === 'ArrowDown') {
       if (suggestions.length === 0) return;
       event.preventDefault();

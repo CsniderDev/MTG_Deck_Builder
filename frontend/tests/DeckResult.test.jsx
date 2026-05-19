@@ -18,6 +18,7 @@ function makeDeck(overrides = {}) {
     ],
     explanation: 'First paragraph.\n\nSecond paragraph.',
     notes: ['Padded 90 basic lands to reach 99.'],
+    substitutions: [],
     source: 'heuristic',
     ...overrides,
   };

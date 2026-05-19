@@ -7,10 +7,11 @@ interface MagicCardProps {
 }
 
 const MagicCardItem: React.FC<MagicCardProps> = ({ card, disableHover }) => {
+  /** Render a card image plus an optional centered hover preview. */
   const [isHovered, setIsHovered] = useState<boolean>(false);
 
-  // Helper to handle DFCs (Double-Faced Cards) logic safely
   const getImageUrl = (size: keyof ScryfallImageUris): string => {
+    /** Resolve a single-faced or front-face image URL for a requested size. */
     if (card.image_uris) {
       return card.image_uris[size] || '';
     }

@@ -21,6 +21,7 @@ function makeDeckPayload(version = 1, commanderName = 'Atraxa, Praetors\' Voice'
     decklist: [{ name: 'Sol Ring', count: 1, category: 'Ramp' }],
     explanation: 'Plan.',
     notes: [],
+    substitutions: [],
     source: 'llm',
   };
 }
@@ -74,7 +75,7 @@ describe('App', () => {
       routedFetch([
         ['/api/health', jsonResponse({ status: 'ok', llm_enabled: true })],
         ['/api/decks/build', () => jsonResponse(makeDeckPayload(1))],
-        ['/api/decks/revamp', () => jsonResponse(makeDeckPayload(2))],
+        ['/api/decks/revamp', () => jsonResponse(makeDeckPayload(2, 'Atraxa, Praetors\' Voice'))],
         [/\/api\/cards\/autocomplete/, jsonResponse({ suggestions: [] })],
       ]),
     );
@@ -107,6 +108,48 @@ describe('App', () => {
     expect(revampBody.change_request).toBe('fewer combos');
   });
 
+  it('renders LLM substitution explanations after a revamp', async () => {
+    const fetchSpy = vi.spyOn(globalThis, 'fetch').mockImplementation(
+      routedFetch([
+        ['/api/health', jsonResponse({ status: 'ok', llm_enabled: true })],
+        ['/api/decks/build', () => jsonResponse(makeDeckPayload(1))],
+        [
+          '/api/decks/revamp',
+          () =>
+            jsonResponse({
+              ...makeDeckPayload(2),
+              substitutions: [
+                {
+                  removed: [{ name: 'Cultivate', count: 1 }],
+                  added: [{ name: 'Nature\'s Lore', count: 1 }],
+                  explanation: 'Nature\'s Lore ramps earlier and keeps the mana curve lower.',
+                },
+              ],
+            }),
+        ],
+        [/\/api\/cards\/autocomplete/, jsonResponse({ suggestions: [] })],
+      ]),
+    );
+
+    const user = userEvent.setup();
+    render(<App />);
+    await screen.findByText(/with gemini guidance/i);
+
+    await user.type(screen.getByLabelText(/commander/i), 'Atraxa');
+    await user.type(screen.getByLabelText(/deck concept/i), 'proliferate');
+    await user.click(screen.getByRole('button', { name: /build deck/i }));
+    await screen.findByText(/v1/);
+
+    await user.type(screen.getByPlaceholderText(/swap out the infinite combos/i), 'more efficient ramp');
+    await user.click(screen.getByRole('button', { name: /generate v2/i }));
+
+    expect(await screen.findByText(/LLM substitutions/i)).toBeInTheDocument();
+    expect(screen.getByText(/Cultivate/)).toBeInTheDocument();
+    expect(screen.getByText(/^Nature's Lore$/)).toBeInTheDocument();
+    expect(screen.getByText(/ramps earlier and keeps the mana curve lower/i)).toBeInTheDocument();
+    expect(fetchSpy).toHaveBeenCalled();
+  });
+
   it('surfaces error messages from the API', async () => {
     vi.spyOn(globalThis, 'fetch').mockImplementation(
       routedFetch([
@@ -131,5 +174,36 @@ describe('App', () => {
     await user.click(screen.getByRole('button', { name: /build deck/i }));
 
     expect(await screen.findByText(/'Foo' is not a valid commander\./)).toBeInTheDocument();
+  });
+
+  it('can start from an existing decklist and call the revamp endpoint directly', async () => {
+    const fetchSpy = vi.spyOn(globalThis, 'fetch').mockImplementation(
+      routedFetch([
+        ['/api/health', jsonResponse({ status: 'ok', llm_enabled: true })],
+        ['/api/decks/revamp', () => jsonResponse(makeDeckPayload(1))],
+        [/\/api\/cards\/autocomplete/, jsonResponse({ suggestions: [] })],
+      ]),
+    );
+
+    const user = userEvent.setup();
+    render(<App />);
+    await screen.findByText(/with gemini guidance/i);
+
+    await user.click(screen.getByRole('tab', { name: /start from existing decklist/i }));
+    await user.type(screen.getByLabelText(/commander/i), 'Atraxa');
+    await user.type(screen.getByLabelText(/what should the ai do to this deck/i), 'power it down');
+    await user.type(screen.getByLabelText(/existing decklist/i), '1 Atraxa, Praetors\' Voice{enter}1 Sol Ring');
+    await user.click(screen.getByRole('button', { name: /revise decklist/i }));
+
+    expect(await screen.findByText(/v1/)).toBeInTheDocument();
+    expect(fetchSpy).toHaveBeenCalledWith(
+      '/api/decks/revamp',
+      expect.objectContaining({ method: 'POST' }),
+    );
+    const body = JSON.parse(fetchSpy.mock.calls.find((call) => call[0] === '/api/decks/revamp')[1].body);
+    expect(body.commander).toBe('Atraxa');
+    expect(body.previous_version).toBe(0);
+    expect(body.change_request).toBe('power it down');
+    expect(body.previous_decklist).toEqual([{ name: 'Sol Ring', count: 1 }]);
   });
 });

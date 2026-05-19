@@ -48,6 +48,12 @@ class MagicCard(BaseModel):
     card_faces: list[MagicCardFace] = Field(default_factory=list)
 
 
+class DeckSubstitution(BaseModel):
+    removed: list[MagicCard] = Field(default_factory=list)
+    added: list[MagicCard] = Field(default_factory=list)
+    explanation: str = ""
+
+
 class BuildDeckRequest(BaseModel):
     commander: str = Field(..., min_length=1, max_length=200)
     bracket: BracketLevel
@@ -76,6 +82,7 @@ class DeckResponse(BaseModel):
     decklist: list[MagicCard]
     explanation: str
     notes: list[str] = Field(default_factory=list)
+    substitutions: list[DeckSubstitution] = Field(default_factory=list)
     source: Literal["llm", "heuristic"]
 
 
