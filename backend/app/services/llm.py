@@ -35,10 +35,12 @@ Respond ONLY with a single JSON object, no prose, no markdown fences. Schema:
   ]
 }
 Rules:
-- The list must total exactly 99 cards (the commander is separate).
+- The list must total exactly 99 cards (the commander is separate) unless there 
+  is a partner commander or a background card, the non-commander list must total at most 98 cards to allow for them.
 - Use the commander's color identity only. Never include cards outside it.
 - Basic lands ("Plains", "Island", "Swamp", "Mountain", "Forest", "Wastes") may
-  repeat with count > 1; every other card must have count == 1 (singleton).
+  repeat with count > 1; every other card must have count == 1 (singleton) UNLESS the card specifies otherwise, like "Hare Apparent"
+  or other similar cards.
 - Cover ramp, card draw, removal/interaction, threats, and an appropriate land
   count for the bracket and curve.
 - Respect the bracket constraints described in the user message, including the
@@ -48,6 +50,14 @@ Rules:
 - When building from scratch, return an empty ``substitutions`` array.
 - When revising an existing deck, include a ``substitutions`` entry for each
   meaningful card-for-card or package-for-package change, with concise reasons.
+- Universes Beyond cards and cards with alternate printed names are valid if they 
+  are Commander-legal and resolvable via Scryfall. Prefer official Scryfall names in
+  the final output when possible. Please verify that all commander legal cards are considered
+  especially from the newer sets and universes beyond - treat them as real options if they fit the concept and constraints.
+- For categories, do not over complicate. If there are certain standout synergies 
+  or themes, label them with short tags like "ramp", "interaction", "card draw", 
+  "win condition", "Board Wipe", "Theme Support" (but replace the word theme with the actual theme of the deck),
+  etc. Otherwise, just use "Utility" for everything that doesn't fit into a small number of obvious categories.
 """.strip()
 
 
