@@ -28,6 +28,7 @@ from .scryfall import ScryfallClient, ScryfallError
 logger = logging.getLogger(__name__)
 
 DECK_SIZE = 99  # cards in the 99, commander is tracked separately
+DECK_SIZE_WITH_PARTNER = 98  # max non-commander cards when a partner is present
 _BASIC_BY_COLOR = {"W": "Plains", "U": "Island", "B": "Swamp", "R": "Mountain", "G": "Forest"}
 _BASIC_NAMES = {*_BASIC_BY_COLOR.values(), "Wastes"}
 
@@ -507,6 +508,7 @@ def _normalize_decklist(
         (commander_card.get("name") or "").lower(),
         (secondary_commander_card or {}).get("name", "").lower(),
     }
+    total_cards_for_deck = DECK_SIZE_WITH_PARTNER if secondary_commander_card else DECK_SIZE
     seen: dict[str, MagicCard] = {}
     for entry in raw_list:
         if not isinstance(entry, dict):
@@ -532,12 +534,12 @@ def _normalize_decklist(
         seen[key] = MagicCard(name=name, count=count, category=category)
 
     total = sum(card.count for card in seen.values())
-    if total > DECK_SIZE:
-        notes.append(f"Trimmed {total - DECK_SIZE} extra cards to reach 99.")
-        _trim_to_size(seen, DECK_SIZE)
-    elif total < DECK_SIZE:
-        notes.append(f"Padded {DECK_SIZE - total} basic lands to reach 99.")
-        _pad_with_basics(seen, commander_card, DECK_SIZE - total)
+    if total > total_cards_for_deck:
+        notes.append(f"Trimmed {total - total_cards_for_deck} extra cards to reach {total_cards_for_deck}.")
+        _trim_to_size(seen, total_cards_for_deck)
+    elif total < total_cards_for_deck:
+        notes.append(f"Padded {total_cards_for_deck - total} basic lands to reach {total_cards_for_deck}.")
+        _pad_with_basics(seen, commander_card, total_cards_for_deck - total)
 
     return list(seen.values())
 
