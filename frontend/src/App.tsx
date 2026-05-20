@@ -1,7 +1,6 @@
 import React, { useEffect, useState } from 'react';
 import DeckForm from './components/DeckForm';
 import DeckResult from './components/DeckResult';
-import DeckDiff from './components/DeckDiff';
 import { buildDeck, fetchHealth, revampDeck, fetchBannedListAndGamechangers } from './api';
 import type {
   BuildDeckPayload,
@@ -204,7 +203,6 @@ export default function App(): React.ReactElement {
         />
         {error && <div className="error">{error}</div>}
         {newDeck && <DeckResult deck={newDeck} onRevamp={handleRevamp} revamping={revamping} />}
-        {newDeck?.substitutions?.length ? <DeckDiff substitutions={newDeck.substitutions} /> : null}
       </main>
     </div>
   );

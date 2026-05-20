@@ -2,6 +2,7 @@ import React, { useMemo, useState } from 'react';
 import type { DeckResponse, MagicCard } from '../types';
 import MagicCardItem from './MagicCard';
 import DeckStats from './DeckStats';
+import DeckDiff from './DeckDiff';
 
 function buildDeckText(deck: DeckResponse): string {
   /** Convert a rendered deck into a text decklist suitable for clipboard export. */
@@ -103,7 +104,7 @@ export default function DeckResult({
       </header>
 
       <DeckStats deck={deck} />
-
+      {deck?.substitutions?.length ? <DeckDiff substitutions={deck.substitutions} /> : null}
       <div className="deck-result__body">
         <div className="deck-list">
           {[...grouped.entries()].map(([cat, cards]) => (

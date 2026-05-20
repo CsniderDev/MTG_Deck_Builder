@@ -89,7 +89,15 @@ export default function DeckForm({ mode = 'build', onSubmit, loading, initial }:
       banned_list: bannedListState,
     };
     if (isExistingMode) {
-      onSubmit({ ...commonValues, decklist_text: decklistText.trim() });
+      //remove the commanders from the decklist if they are present on submit
+      let decklistTextTrimmed = decklistText.trim();
+      const commanderRegex = new RegExp(`^\\s*1?\\s*${commander.trim()}\\s*$`, 'im');
+      decklistTextTrimmed = decklistTextTrimmed.replace(commanderRegex, '');
+      if (secondaryCommander.trim()) {
+        const secondaryCommanderRegex = new RegExp(`^\\s*1?\\s*${secondaryCommander.trim()}\\s*$`, 'im');
+        decklistTextTrimmed = decklistTextTrimmed.replace(secondaryCommanderRegex, '');
+      }
+      onSubmit({ ...commonValues, decklist_text: decklistTextTrimmed });
       return;
     }
     onSubmit(commonValues);
