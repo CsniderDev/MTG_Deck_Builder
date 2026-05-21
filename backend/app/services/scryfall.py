@@ -107,6 +107,8 @@ class ScryfallClient:
                 f"{card.get('name', name)!r} is not a valid Commander-legal commander."
             )
         return card
+    
+    
 
     async def get_card(self, name: str) -> Optional[dict[str, Any]]:
         """Fetch a single card by exact name first, then fuzzy fallback, then search as last resort."""
@@ -137,6 +139,34 @@ class ScryfallClient:
             pass
 
         return None
+
+    async def autocomplete_commanders(
+        self, query: str, commander_only: bool = True, limit: int = 15
+    ) -> list[str]:
+        """Return commander suggestions for a query using Scryfall search endpoints."""
+        query = (query or "").strip()
+        if not query:
+            return []
+        if commander_only:
+            try:
+                data = await self._get(
+                    "/cards/search",
+                    {
+                        "q": f"is:commander name:{query}",
+                        "order": "edhrec",
+                        "unique": "cards",
+                    },
+                )
+            except ScryfallError:
+                return []
+            seen: list[str] = []
+            for card in data.get("data") or []:
+                name = card.get("name")
+                if name and name not in seen:
+                    seen.append(name)
+                    if len(seen) >= limit:
+                        break
+            return seen
 
     async def resolve_commander(self, name: str) -> dict[str, Any]:
         """Resolve a name to a Commander-legal commander card object."""

@@ -23,7 +23,7 @@ logger = logging.getLogger(__name__)
 _DECK_SCHEMA_INSTRUCTIONS = """
 Respond ONLY with a single JSON object, no prose, no markdown fences. Schema:
 {
-  "decklist": [{"name": "<exact card name>", "count": <int>, "category": "<short label>"}],
+  "decklist": [{"name": "<exact card name>", "count": <int>, "category": "<short label>", oracle_text: "<card oracle text for reference>"}],
   "explanation": "<2-4 paragraph plain-text explanation of the deck plan>",
   "notes": ["<optional short bullet>", "..."],
   "substitutions": [
@@ -43,6 +43,9 @@ Rules:
 - Basic lands ("Plains", "Island", "Swamp", "Mountain", "Forest", "Wastes") may
   repeat with count > 1; every other card must have count == 1 (singleton) UNLESS the card specifies otherwise, like "Hare Apparent"
   or other similar cards.
+- When building out the mana base, ensure that the mana production supports the mana cost. If mana costs
+  more heavily feature one color, prioritize that color in the mana base, but don't neglect the others. 
+  Include appropriate mana-fixing and colorless sources if needed.
 - Cover ramp, card draw, removal/interaction, threats, and an appropriate land
   count for the bracket and curve.
 - Respect the bracket constraints described in the user message, including the

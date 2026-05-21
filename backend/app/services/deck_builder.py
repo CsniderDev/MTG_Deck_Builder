@@ -508,32 +508,56 @@ def _normalize_decklist(
         (commander_card.get("name") or "").lower(),
         (secondary_commander_card or {}).get("name", "").lower(),
     }
+    
     total_cards_for_deck = DECK_SIZE_WITH_PARTNER if secondary_commander_card else DECK_SIZE
     seen: dict[str, MagicCard] = {}
+    
     for entry in raw_list:
         if not isinstance(entry, dict):
             continue
+            
         name = (entry.get("name") or "").strip()
         if not name or name.lower() in commander_names:
             continue
+            
         try:
             count = int(entry.get("count") or 1)
         except (TypeError, ValueError):
             count = 1
         count = max(1, count)
+        
         category = (entry.get("category") or "").strip() or None
         key = name.lower()
         is_basic = name in _BASIC_NAMES
+
+        # Check if the card allows any number in a deck (including checking card_faces layout)
+        oracle_text = (entry.get("oracle_text") or "").lower()
+        allows_any_number = "a deck can have any number of cards named" in oracle_text
+        
+        if not allows_any_number and "card_faces" in entry:
+            allows_any_number = any(
+                "a deck can have any number of cards named" in (face.get("oracle_text") or "").lower()
+                for face in entry["card_faces"]
+            )
+
+        # Handle duplicate entries found in the raw input parsing stream
         if key in seen:
-            if is_basic:
+            if is_basic or allows_any_number:
                 seen[key].count += count
-            # Non-basics already present: ignore duplicates (singleton rule).
-            continue
-        if not is_basic:
+            else:
+                # Enforce singleton behavior for normal duplicate rows
+                pass 
+            continue  # Explicitly move to next entry
+
+        # Enforce count = 1 for normal cards on their very first structural pass
+        if not is_basic and not allows_any_number:
             count = 1
+            
         seen[key] = MagicCard(name=name, count=count, category=category)
 
+    # Calculate current size state
     total = sum(card.count for card in seen.values())
+    
     if total > total_cards_for_deck:
         notes.append(f"Trimmed {total - total_cards_for_deck} extra cards to reach {total_cards_for_deck}.")
         _trim_to_size(seen, total_cards_for_deck)
