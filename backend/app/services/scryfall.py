@@ -109,49 +109,58 @@ class ScryfallClient:
         return card
 
     async def get_card(self, name: str) -> Optional[dict[str, Any]]:
-        """Fetch a single card by exact name first, then fuzzy fallback if needed."""
+        """Fetch a single card by exact name first, then fuzzy fallback, then search as last resort."""
         try:
             return await self.named(name, fuzzy=False)
         except ScryfallError:
-            try:
-                return await self.named(name, fuzzy=True)
-            except ScryfallError:
-                return None
+            pass
 
-    async def autocomplete_commanders(
-        self, query: str, commander_only: bool = True, limit: int = 15
-    ) -> list[str]:
-        """Return commander suggestions for a query using Scryfall search endpoints."""
-        query = (query or "").strip()
-        if not query:
-            return []
-        if commander_only:
-            try:
-                data = await self._get(
-                    "/cards/search",
-                    {
-                        "q": f"is:commander name:{query}",
-                        "order": "edhrec",
-                        "unique": "cards",
-                    },
-                )
-            except ScryfallError:
-                return []
-            seen: list[str] = []
-            for card in data.get("data") or []:
-                name = card.get("name")
-                if name and name not in seen:
-                    seen.append(name)
-                    if len(seen) >= limit:
-                        break
-            return seen
+        try:
+            return await self.named(name, fuzzy=True)
+        except ScryfallError:
+            pass
+            
+        # Universes Beyond / Flavor Name Fallback
+        # Scryfall's named endpoint often fails on flavor names, but the search endpoint catches them.
         try:
             data = await self._get(
-                "/cards/autocomplete", {"q": query, "include_extras": "false"}
+                "/cards/search",
+                {
+                    "q": f'"{name}"', 
+                    "include_extras": "true"
+                }
             )
+            cards = data.get("data") or []
+            if cards:
+                return cards[0]
         except ScryfallError:
-            return []
-        return list((data.get("data") or [])[:limit])
+            pass
+
+        return None
+
+    async def resolve_commander(self, name: str) -> dict[str, Any]:
+        """Resolve a name to a Commander-legal commander card object."""
+        # Use our robust get_card instead of the strict named() method
+        card = await self.get_card(name)
+        if not card:
+            raise ScryfallError(
+                f"Could not find card matching {name!r}."
+            )
+
+        type_line = (card.get("type_line") or "").lower()
+        oracle = (card.get("oracle_text") or "").lower()
+        legal = (card.get("legalities") or {}).get("commander") == "legal"
+        is_legendary_creature = "legendary" in type_line and "creature" in type_line
+        is_planeswalker_commander = (
+            "planeswalker" in type_line and "can be your commander" in oracle
+        )
+        is_background_partner_pair = False  # single-card resolution only for now
+        
+        if not legal or not (is_legendary_creature or is_planeswalker_commander or is_background_partner_pair):
+            raise ScryfallError(
+                f"{card.get('name', name)!r} is not a valid Commander-legal commander."
+            )
+        return card
 
     async def get_commander_companion_options(self, name: str) -> dict[str, Any]:
         """Return compatible secondary commander/background choices for a commander."""
@@ -278,17 +287,56 @@ class ScryfallClient:
         for i in range(0, len(missing_names), chunk_size):
             chunk = missing_names[i:i + chunk_size]
             payload = {"identifiers": [{"name": n} for n in chunk]}
-            response_data = await self._post("/cards/collection", payload)
+            
+            try:
+                response_data = await self._post("/cards/collection", payload)
+            except ScryfallError:
+                # If the batch completely fails, queue them all up for individual recovery
+                response_data = {"data": [], "not_found": [{"name": n} for n in chunk]}
+
+            # 1. Cache the successfully found cards
             for card in response_data.get("data", []):
                 card_name = (card.get("name") or "").strip().lower()
+                flavor_name = (card.get("flavor_name") or "").strip().lower()
+                
+                # Cache by Oracle name
                 if card_name:
                     self._collection_cache[card_name] = card
+                # Cache by Flavor Name (e.g. "The Cloudsea Djinn")
+                if flavor_name:
+                    self._collection_cache[flavor_name] = card
 
-        return [
-            self._collection_cache[name.lower()]
-            for name in unique_names
-            if name.lower() in self._collection_cache
-        ]
+            # 2. Recover cards the bulk endpoint rejected (Flavor Names, misspellings)
+            not_found = response_data.get("not_found", [])
+            for nf in not_found:
+                nf_name = nf.get("name")
+                if not nf_name:
+                    continue
+                
+                # Fetch individually using our fallback logic
+                card = await self.get_card(nf_name)
+                if card:
+                    self._collection_cache[nf_name.lower()] = card
+                    
+                    primary_name = (card.get("name") or "").strip().lower()
+                    if primary_name:
+                        self._collection_cache[primary_name] = card
+
+        # 3. Return results matching the original requested list
+        results = []
+        for name in unique_names:
+            lower_name = name.lower()
+            if lower_name in self._collection_cache:
+                results.append(self._collection_cache[lower_name])
+            else:
+                # Absolute last resort if it somehow slipped through
+                card = await self.get_card(name)
+                if card:
+                    self._collection_cache[lower_name] = card
+                    results.append(card)
+
+        return results
+    
 
     async def _search_cards(self, query: str) -> list[dict[str, Any]]:
         """Run a Scryfall search query and return the first page of unique cards."""
@@ -298,6 +346,7 @@ class ScryfallClient:
                 "q": query,
                 "order": "name",
                 "unique": "cards",
+                "include_extras": "true",
             },
         )
         return list(data.get("data") or [])

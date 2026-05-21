@@ -1,7 +1,12 @@
-import React, { useMemo } from 'react';
+import React, { useMemo, useState } from 'react';
 import type { DeckResponse } from '../types';
 import { PieChart, Pie, Cell, ResponsiveContainer, Tooltip } from 'recharts';
 import type { ValueType, NameType } from 'recharts/types/component/DefaultTooltipContent';
+
+type ColorlessVisibilityState = {
+  cost: boolean;
+  production: boolean;
+};
 
 export interface DeckStatsProps {
   deck: DeckResponse;
@@ -148,8 +153,28 @@ export default function DeckStats({ deck }: DeckStatsProps): React.ReactElement 
   /** Render styled deck statistics including pie charts for mana cost and production. */
   const totalPrice = useMemo(() => getTotalPrice(deck), [deck]);
   const { manaCost, manaProduction, averageManaValue } = useMemo(() => getDeckStats(deck), [deck]);
+  const [showColorless, setShowColorless] = useState<ColorlessVisibilityState>({
+    cost: false,
+    production: false,
+  });
   const manaCostData = useMemo(() => toPieData(manaCost), [manaCost]);
   const manaProductionData = useMemo(() => toPieData(manaProduction), [manaProduction]);
+  const filteredManaCostData = useMemo(
+    () => manaCostData.filter((entry) => showColorless.cost || entry.symbol !== 'C'),
+    [manaCostData, showColorless.cost],
+  );
+  const filteredManaProductionData = useMemo(
+    () => manaProductionData.filter((entry) => showColorless.production || entry.symbol !== 'C'),
+    [manaProductionData, showColorless.production],
+  );
+
+  function toggleColorless(section: keyof ColorlessVisibilityState): void {
+    /** Toggle colorless mana visibility for a specific chart section. */
+    setShowColorless((current) => ({
+      ...current,
+      [section]: !current[section],
+    }));
+  }
 
   return (
     <section className="deck-stats" aria-label="Deck statistics">
@@ -166,18 +191,38 @@ export default function DeckStats({ deck }: DeckStatsProps): React.ReactElement 
       </div>
       <div className="deck-stats__charts">
         <div className="deck-stats__chart-card">
-          <h4>Mana Cost Breakdown</h4>
-          <div className="deck-stats__chart-area">
-            {renderPie(manaCostData, 'cost')}
+          <div className="deck-stats__chart-header">
+            <h4>Mana Cost Breakdown</h4>
+            <button
+              type="button"
+              className={showColorless.cost ? 'deck-stats__toggle deck-stats__toggle--active' : 'deck-stats__toggle'}
+              onClick={() => toggleColorless('cost')}
+              aria-pressed={showColorless.cost}
+            >
+              {showColorless.cost ? 'Hide colorless' : 'Show colorless'}
+            </button>
           </div>
-          {renderLegend(manaCostData)}
+          <div className="deck-stats__chart-area">
+            {renderPie(filteredManaCostData, 'cost')}
+          </div>
+          {renderLegend(filteredManaCostData)}
         </div>
         <div className="deck-stats__chart-card">
-          <h4>Mana Production Breakdown</h4>
-          <div className="deck-stats__chart-area">
-            {renderPie(manaProductionData, 'production')}
+          <div className="deck-stats__chart-header">
+            <h4>Mana Production Breakdown</h4>
+            <button
+              type="button"
+              className={showColorless.production ? 'deck-stats__toggle deck-stats__toggle--active' : 'deck-stats__toggle'}
+              onClick={() => toggleColorless('production')}
+              aria-pressed={showColorless.production}
+            >
+              {showColorless.production ? 'Hide colorless' : 'Show colorless'}
+            </button>
           </div>
-          {renderLegend(manaProductionData)}
+          <div className="deck-stats__chart-area">
+            {renderPie(filteredManaProductionData, 'production')}
+          </div>
+          {renderLegend(filteredManaProductionData)}
         </div>
       </div>
       {deck.notes?.length > 0 && (

@@ -38,6 +38,8 @@ Rules:
 - The list must total exactly 99 cards (the commander is separate) unless there 
   is a partner commander or a background card, the non-commander list must total at most 98 cards to allow for them.
 - Use the commander's color identity only. Never include cards outside it.
+- consider the theme of the commander and the user's concept as the primary direction for card selection. 
+  Use the EDHREC recommendations as a reference pool, but substitute freely to honor the concept and constraints.
 - Basic lands ("Plains", "Island", "Swamp", "Mountain", "Forest", "Wastes") may
   repeat with count > 1; every other card must have count == 1 (singleton) UNLESS the card specifies otherwise, like "Hare Apparent"
   or other similar cards.
@@ -50,6 +52,11 @@ Rules:
 - When building from scratch, return an empty ``substitutions`` array.
 - When revising an existing deck, include a ``substitutions`` entry for each
   meaningful card-for-card or package-for-package change, with concise reasons.
+- Understand that if the user has a card already in their deck, then that card
+  is a valid card and 
+-  If there is card data provided in the attached JSON payload, it is verified, real, and exists on Scryfall. 
+- Do NOT flag any card as a "hallucination," "placeholder," or "invalid card" based on your internal knowledge base. This application handles Universes Beyond (UB), flavor-name variants, and brand-new card sets that may be past your training data cutoff.
+- If a card is present in the provided list, treat it as an absolutely legal, valid Magic: The Gathering card for the purposes of this deck evaluation. Trust the provided data blindly.
 - Universes Beyond cards and cards with alternate printed names are valid if they 
   are Commander-legal and resolvable via Scryfall. Prefer official Scryfall names in
   the final output when possible. Please verify that all commander legal cards are considered
@@ -58,6 +65,9 @@ Rules:
   or themes, label them with short tags like "ramp", "interaction", "card draw", 
   "win condition", "Board Wipe", "Theme Support" (but replace the word theme with the actual theme of the deck),
   etc. Otherwise, just use "Utility" for everything that doesn't fit into a small number of obvious categories.
+- You must actively consider the brand-new sets and Universes Beyond card options provided in the [New Card Pool] context below. 
+- Evaluate these cards strictly by their mechanics, type lines, and oracle text provided in the payload. Do not ignore them just because they are unfamiliar to your historical training data.
+- Integrate these new tools seamlessly into the deck strategy if they synergize with the Commander's theme.
 """.strip()
 
 
