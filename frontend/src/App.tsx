@@ -11,13 +11,38 @@ import type {
   MagicCard,
 } from './types';
 
+const TRAILING_SET_CODE_RE = /\s*(?:\([A-Za-z0-9]{2,6}\)|\[[A-Za-z0-9]{2,6}\])(?=\s*[0-9]+[A-Za-z]?(?:\s*[*★☆])*\s*$)\s*/;
+const TRAILING_COLLECTOR_NUMBER_RE = /\s+[0-9]+[A-Za-z]?(?:\s*[*★☆])*\s*$/;
+
 type DeckSession =
   | { mode: 'build'; values: BuildDeckPayload }
   | { mode: 'existing'; values: ExistingDeckActionPayload };
 
+function deckIdentitySignature(deck: DeckResponse): string {
+  /** Build a stable signature for the actual deck contents, ignoring version/notes/explanation metadata. */
+  const library = [...deck.decklist]
+    .map((card) => ({ name: card.name.trim().toLowerCase(), count: card.count || 1 }))
+    .sort((a, b) => a.name.localeCompare(b.name) || a.count - b.count);
+  return JSON.stringify({
+    commander: deck.commander.name.trim().toLowerCase(),
+    secondary_commander: deck.secondary_commander?.name?.trim().toLowerCase() || '',
+    decklist: library,
+  });
+}
+
+function scrubDecklistCardName(rawName: string): string {
+  /** Remove trailing set-code / collector-number decorations from pasted decklist entries. */
+  return rawName
+    .replace(TRAILING_SET_CODE_RE, ' ')
+    .replace(TRAILING_COLLECTOR_NUMBER_RE, '')
+    .trim();
+}
+
 function parseDecklistText(decklistText: string, commanderNames: string[]): MagicCard[] {
   /** Parse a pasted text decklist into API-ready card rows while removing the commander line. */
-  const commanderKeys = commanderNames.map((name) => name.trim().toLowerCase()).filter(Boolean);
+  const commanderKeys = commanderNames
+    .map((name) => scrubDecklistCardName(name).trim().toLowerCase())
+    .filter(Boolean);
   const cards: MagicCard[] = [];
   for (const rawLine of decklistText.split(/\r?\n/)) {
     const line = rawLine.trim();
@@ -27,7 +52,7 @@ function parseDecklistText(decklistText: string, commanderNames: string[]): Magi
       throw new Error(`Could not parse decklist line: ${line}`);
     }
     const count = Number(match[1]);
-    const name = match[2].trim();
+    const name = scrubDecklistCardName(match[2].trim());
     const normalizedName = name.toLowerCase();
     const isCommanderLine = commanderKeys.some((commanderKey) => (
       normalizedName === commanderKey ||
@@ -133,12 +158,13 @@ export default function App(): React.ReactElement {
     await handleBuild(values);
   }
 
-  async function handleRevamp(changeRequest: string): Promise<void> {
+  async function handleRevamp(changeRequest: string): Promise<boolean> {
     /** Revamp the currently displayed deck into the next numbered version. */
-    if (!newDeck || !session) return;
+    if (!newDeck || !session) return false;
     setRevamping(true);
     setError('');
     try {
+      const previousDeckSignature = deckIdentitySignature(newDeck);
       const basePayload = {
         commander: session.values.commander,
         secondary_commander: session.values.secondary_commander,
@@ -152,8 +178,10 @@ export default function App(): React.ReactElement {
       };
       const result = await revampDeck(basePayload);
       setNewDeck(result);
+      return deckIdentitySignature(result) !== previousDeckSignature;
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
+      return false;
     } finally {
       setRevamping(false);
     }
@@ -162,7 +190,7 @@ export default function App(): React.ReactElement {
   return (
     <div className="app">
       <header className="app__header">
-        <h1>MTG Commander Deck Builder</h1>
+        <h1>MTG Commander Deck Forge</h1>
         <p className="muted">
           Powered by Scryfall and EDHREC{health?.llm_enabled ? ', with Gemini guidance' : ''}.
         </p>

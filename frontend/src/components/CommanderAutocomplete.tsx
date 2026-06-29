@@ -1,5 +1,6 @@
 import React, { useEffect, useId, useRef, useState } from 'react';
 import { autocompleteCommanders } from '../api';
+import { useDebounce } from './useDebounce'; // Adjust path as necessary
 
 const MIN_QUERY = 2;
 const DEBOUNCE_MS = 250;
@@ -23,25 +24,22 @@ export default function CommanderAutocomplete({
   localSuggestions,
   commanderOnly = true,
 }: CommanderAutocompleteProps): React.ReactElement {
-  /** Render a debounced autocomplete input for commander selection. */
   const [suggestions, setSuggestions] = useState<string[]>([]);
   const [open, setOpen] = useState<boolean>(false);
   const [activeIndex, setActiveIndex] = useState<number>(-1);
   const [loading, setLoading] = useState<boolean>(false);
   const listId = useId();
-  const abortRef = useRef<AbortController | null>(null);
-  const debounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  
   const skipNextFetchRef = useRef<boolean>(false);
-  const requestSeqRef = useRef<number>(0);
 
+  // 1. Track the debounced string stream
+  const debouncedSearchTerm = useDebounce(value, DEBOUNCE_MS);
+
+  // 2. Localized useEffect hook
   useEffect(() => {
-    const trimmed = (value || '').trim();
+    const trimmed = (debouncedSearchTerm || '').trim();
+
     if (localSuggestions) {
-      if (debounceRef.current) clearTimeout(debounceRef.current);
-      if (abortRef.current) {
-        abortRef.current.abort();
-        abortRef.current = null;
-      }
       const filtered = localSuggestions.filter((name) =>
         !trimmed ? true : name.toLowerCase().includes(trimmed.toLowerCase()),
       );
@@ -51,62 +49,54 @@ export default function CommanderAutocomplete({
       setLoading(false);
       return undefined;
     }
+
     if (skipNextFetchRef.current) {
       skipNextFetchRef.current = false;
       return undefined;
     }
-    if (debounceRef.current) clearTimeout(debounceRef.current);
-    if (abortRef.current) {
-      abortRef.current.abort();
-      abortRef.current = null;
-    }
-    if (trimmed.length < MIN_QUERY) {
+
+    if (trimmed.length < MIN_QUERY || disabled) {
       setSuggestions([]);
       setOpen(false);
       setActiveIndex(-1);
       setLoading(false);
       return undefined;
     }
-    debounceRef.current = setTimeout(async () => {
-      const controller = new AbortController();
-      const requestSeq = requestSeqRef.current + 1;
-      requestSeqRef.current = requestSeq;
-      abortRef.current = controller;
-      setLoading(true);
+
+    const controller = new AbortController();
+    setLoading(true);
+
+    async function fireAPI() {
       try {
         const names = await autocompleteCommanders(trimmed, {
           signal: controller.signal,
           commanderOnly,
         });
-        if (controller.signal.aborted || requestSeq !== requestSeqRef.current) return;
+        
         setSuggestions(names);
         setOpen(names.length > 0);
         setActiveIndex(-1);
       } catch (err) {
-        if (controller.signal.aborted || requestSeq !== requestSeqRef.current) return;
         if (!(err instanceof DOMException) || err.name !== 'AbortError') {
           setSuggestions([]);
           setOpen(false);
         }
       } finally {
-        if (!controller.signal.aborted && requestSeq === requestSeqRef.current) {
+        if (!controller.signal.aborted) {
           setLoading(false);
-          abortRef.current = null;
         }
       }
-    }, DEBOUNCE_MS);
-    return () => {
-      if (debounceRef.current) clearTimeout(debounceRef.current);
-    };
-  }, [value, localSuggestions, commanderOnly, disabled]);
-
-  function pick(name: string): void {
-    /** Commit a selected suggestion into the input and close the dropdown. */
-    if (debounceRef.current) clearTimeout(debounceRef.current);
-    if (abortRef.current) {
-      abortRef.current.abort();
-      abortRef.current = null;
     }
+
+    fireAPI();
+
+    return () => {
+      controller.abort();
+    };
+  }, [debouncedSearchTerm, localSuggestions, commanderOnly, disabled]);
+
+  // 3. Selection helper (Inside CommanderAutocomplete)
+  function pick(name: string): void {
     skipNextFetchRef.current = true;
     setLoading(false);
     onChange(name);
@@ -115,8 +105,8 @@ export default function CommanderAutocomplete({
     setActiveIndex(-1);
   }
 
+  // 4. Keyboard Listener (Inside CommanderAutocomplete)
   function handleKeyDown(event: React.KeyboardEvent<HTMLInputElement>): void {
-    /** Support keyboard navigation and selection inside the suggestion list. */
     if (event.key === 'ArrowDown') {
       if (suggestions.length === 0) return;
       event.preventDefault();
@@ -143,6 +133,7 @@ export default function CommanderAutocomplete({
 
   const showList = open && suggestions.length > 0;
 
+  // 5. Explicit Component JSX Return
   return (
     <div className="autocomplete">
       <input

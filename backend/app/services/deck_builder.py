@@ -6,6 +6,8 @@ fails), we fall back to a heuristic that picks the top EDHREC recommendations
 by category and pads the mana base with basic lands.
 """
 from __future__ import annotations
+from collections import Counter
+import re
 
 import logging
 from typing import Any, Optional
@@ -198,10 +200,17 @@ class DeckBuilder:
         bracket_desc = BRACKET_DESCRIPTIONS[request.bracket]
         limit = gamechanger_limit(request.bracket)
         previous_payload = [card.model_dump() for card in request.previous_decklist]
+        previous_normalized = _normalize_decklist(
+            previous_payload,
+            command_zone,
+            [],
+            secondary_commander_card,
+        )
         banned_list = set(name.strip().lower() for name in request.banned_list or [])
         gamechangers = set(name.strip().lower() for name in request.gamechangers or [])
         recommendations: dict[str, list[dict[str, Any]]] = {}
         prefetched_cards: dict[str, dict[str, Any]] = {}
+        llm_failed = False
 
         llm_result = await self._llm.revamp_deck(
             commander=command_zone,
@@ -215,17 +224,17 @@ class DeckBuilder:
             banned_list=banned_list,
         )
         if llm_result is None:
-            # Without an LLM we cannot meaningfully revamp; rebuild instead.
-            recommendations = await self._fetch_recommendations(commander_card["name"])
-            decklist, explanation, source, notes, substitutions = self._materialize(
-                None,
+            llm_failed = True
+            notes = ["LLM unavailable - kept the current decklist instead of revamping."]
+            substitutions = []
+            decklist = _normalize_decklist(
+                previous_payload,
                 command_zone,
-                recommendations,
-                request.bracket,
-                gamechangers,
+                notes,
                 secondary_commander_card,
             )
-            notes.insert(0, "LLM unavailable - regenerated deck heuristically instead of revamping.")
+            explanation = "LLM failed to revamp the deck. The previous decklist was preserved unchanged."
+            source = "heuristic"
         else:
             prefetched_cards, invalid_cards = await self.validate_decklist(
                 llm_result.get("decklist") or [], command_zone.get("color_identity", [])
@@ -235,9 +244,14 @@ class DeckBuilder:
             )
         decklist = await self._hydrate_cards(decklist, prefetched_cards)
         substitutions = await self._hydrate_substitutions(substitutions, prefetched_cards)
+        next_version = (
+            request.previous_version + 1
+            if _decklist_signature(decklist) != _decklist_signature(previous_normalized)
+            else request.previous_version
+        )
 
         return DeckResponse(
-            version=request.previous_version + 1,
+            version=next_version,
             commander=_to_card(commander_card),
             secondary_commander=_to_card(secondary_commander_card) if secondary_commander_card else None,
             bracket=request.bracket,
@@ -497,6 +511,14 @@ def _normalize_swap_cards(raw_cards: Any) -> list[MagicCard]:
     return normalized
 
 
+def _decklist_signature(decklist: list[MagicCard]) -> list[tuple[str, int]]:
+    """Create a stable deck identity using card names and counts only."""
+    return sorted(
+        ((card.name.strip().lower(), int(card.count or 1)) for card in decklist if card.name.strip()),
+        key=lambda item: (item[0], item[1]),
+    )
+
+
 def _normalize_decklist(
     raw_list: list[Any],
     commander_card: dict[str, Any],
@@ -585,20 +607,70 @@ def _trim_to_size(deck: dict[str, MagicCard], target: int) -> None:
 
 
 def _pad_with_basics(deck: dict[str, MagicCard], commander_card: dict[str, Any], needed: int) -> None:
-    """Pad an undersized deck with basics matching the commander's color identity."""
-    colors = commander_card.get("color_identity") or []
-    basics = [_BASIC_BY_COLOR[c] for c in colors if c in _BASIC_BY_COLOR] or ["Wastes"]
-    i = 0
-    while needed > 0:
+    """Pad an undersized deck with basics weighted by the deck's mana pips."""
+    
+    # 1. Tally all colored pips in the current deck
+    pip_counts = Counter()
+    for card in deck.values():
+        # Skip lands when counting pips to avoid feedback loops
+        if card.category == "Land":
+            continue
+            
+        # Assuming your MagicCard or entry has 'mana_cost' (e.g., "{2}{G}{W}")
+        # or 'color_identity' from the Scryfall data
+        # Scryfall 'mana_cost' is the most accurate for 'on-curve' needs
+        cost = getattr(card, 'mana_cost', "") or ""
+        for color in "WUBRG":
+            pip_counts[color] += cost.count(color)
+
+    # 2. Filter pips by Commander's color identity (legal basics only)
+    allowed_colors = commander_card.get("color_identity") or []
+    # If colorless or no pips found, default to Wastes or even distribution
+    relevant_pips = {c: pip_counts[c] for c in allowed_colors if c in _BASIC_BY_COLOR}
+    total_pips = sum(relevant_pips.values())
+
+    # 3. Handle edge case: No pips found or Colorless identity
+    if total_pips == 0:
+        basics = [_BASIC_BY_COLOR[c] for c in allowed_colors if c in _BASIC_BY_COLOR] or ["Wastes"]
+        _distribute_round_robin(deck, basics, needed)
+        return
+
+    # 4. Calculate weighted counts
+    # We use a greedy approach to ensure we don't lose lands to rounding
+    weighted_targets = {}
+    for color, count in relevant_pips.items():
+        share = count / total_pips
+        weighted_targets[_BASIC_BY_COLOR[color]] = int(share * needed)
+
+    # Fill the remaining lands (due to rounding down) based on highest pip priority
+    current_filled = sum(weighted_targets.values())
+    remainder = needed - current_filled
+    
+    # Sort colors by highest pip count to receive the 'remainder' lands
+    sorted_basics = sorted(relevant_pips.keys(), key=lambda c: relevant_pips[c], reverse=True)
+    for i in range(remainder):
+        color = sorted_basics[i % len(sorted_basics)]
+        weighted_targets[_BASIC_BY_COLOR[color]] += 1
+
+    # 5. Apply to the deck
+    for basic_name, count_to_add in weighted_targets.items():
+        if count_to_add <= 0:
+            continue
+        key = basic_name.lower()
+        if key in deck:
+            deck[key].count += count_to_add
+        else:
+            deck[key] = MagicCard(name=basic_name, count=count_to_add, category="Land")
+
+def _distribute_round_robin(deck, basics, needed):
+    """Fallback helper for even distribution."""
+    for i in range(needed):
         basic = basics[i % len(basics)]
         key = basic.lower()
         if key in deck:
             deck[key].count += 1
         else:
             deck[key] = MagicCard(name=basic, count=1, category="Land")
-        needed -= 1
-        i += 1
-
 
 def _enforce_gamechanger_limit(
     raw_list: list[Any], bracket: int, notes: list[str], gamechangers: Optional[set[str]] = None

@@ -24,7 +24,7 @@ function buildDeckText(deck: DeckResponse): string {
 
 export interface DeckResultProps {
   deck: DeckResponse;
-  onRevamp: (changeRequest: string) => void;
+  onRevamp: (changeRequest: string) => Promise<boolean>;
   revamping?: boolean;
 }
 
@@ -53,12 +53,14 @@ export default function DeckResult({
     }
   }
 
-  function handleRevampSubmit(event: React.FormEvent<HTMLFormElement>): void {
-    /** Submit the inline revamp request and clear the text field afterward. */
+  async function handleRevampSubmit(event: React.FormEvent<HTMLFormElement>): Promise<void> {
+    /** Submit the inline revamp request and clear the text field only after success. */
     event.preventDefault();
     if (!changeRequest.trim()) return;
-    onRevamp(changeRequest.trim());
-    setChangeRequest('');
+    const succeeded = await onRevamp(changeRequest.trim());
+    if (succeeded) {
+      setChangeRequest('');
+    }
   }
 
   const grouped = new Map<string, MagicCard[]>();

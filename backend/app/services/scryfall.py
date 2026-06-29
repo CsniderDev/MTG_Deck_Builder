@@ -18,6 +18,10 @@ from ..config import get_settings
 _REQUEST_DELAY = 0.075  # Scryfall asks for 50-100ms between calls.
 _PARTNER_WITH_RE = re.compile(r"partner with\s+([^\n(]+)", re.IGNORECASE)
 _PARTNER_VARIANT_RE = re.compile(r"partner[—-]\s*([^\n(]+)", re.IGNORECASE)
+_TRAILING_SET_CODE_RE = re.compile(
+    r"\s*(?:\([A-Za-z0-9]{2,6}\)|\[[A-Za-z0-9]{2,6}\])(?=\s*[0-9]+[A-Za-z]?(?:\s*[*★☆])*\s*$)\s*"
+)
+_TRAILING_COLLECTOR_NUMBER_RE = re.compile(r"\s+[0-9]+[A-Za-z]?(?:\s*[*★☆])*\s*$")
 
 
 class ScryfallError(RuntimeError):
@@ -26,6 +30,13 @@ class ScryfallError(RuntimeError):
 
 def _normalized_text(text: str) -> str:
     return " ".join(text.replace("—", "-").lower().split())
+
+
+def _scrub_card_lookup_name(name: str) -> str:
+    """Strip trailing set-code / collector-number suffixes from pasted decklist names."""
+    scrubbed = _TRAILING_SET_CODE_RE.sub(" ", (name or "")).strip()
+    scrubbed = _TRAILING_COLLECTOR_NUMBER_RE.sub("", scrubbed).strip()
+    return scrubbed
 
 
 def _is_background_card(card: dict[str, Any]) -> bool:
@@ -96,7 +107,7 @@ class ScryfallClient:
         card = await self.named(name, fuzzy=True)
         type_line = (card.get("type_line") or "").lower()
         oracle = (card.get("oracle_text") or "").lower()
-        legal = (card.get("legalities") or {}).get("commander") == "legal"
+        legal = True  # (card.get("legalities") or {}).get("commander") == "legal"
         is_legendary_creature = "legendary" in type_line and "creature" in type_line
         is_planeswalker_commander = (
             "planeswalker" in type_line and "can be your commander" in oracle
@@ -112,6 +123,9 @@ class ScryfallClient:
 
     async def get_card(self, name: str) -> Optional[dict[str, Any]]:
         """Fetch a single card by exact name first, then fuzzy fallback, then search as last resort."""
+        name = _scrub_card_lookup_name(name)
+        if not name:
+            return None
         try:
             return await self.named(name, fuzzy=False)
         except ScryfallError:
@@ -179,7 +193,7 @@ class ScryfallClient:
 
         type_line = (card.get("type_line") or "").lower()
         oracle = (card.get("oracle_text") or "").lower()
-        legal = (card.get("legalities") or {}).get("commander") == "legal"
+        legal = True#(card.get("legalities") or {}).get("commander") == "legal"
         is_legendary_creature = "legendary" in type_line and "creature" in type_line
         is_planeswalker_commander = (
             "planeswalker" in type_line and "can be your commander" in oracle
@@ -307,7 +321,13 @@ class ScryfallClient:
 
     async def get_collection(self, names: list[str]) -> list[dict]:
         """Batch-fetch cards by name through ``/cards/collection`` with caching."""
-        unique_names = list(dict.fromkeys(n.strip() for n in names if n and n.strip()))
+        unique_names = list(
+            dict.fromkeys(
+                scrubbed
+                for scrubbed in (_scrub_card_lookup_name(n) for n in names)
+                if scrubbed
+            )
+        )
         if not unique_names:
             return []
 

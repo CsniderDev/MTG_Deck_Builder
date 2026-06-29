@@ -201,6 +201,43 @@ async def test_get_collection_caches_cards_across_calls():
 
 
 @pytest.mark.asyncio
+async def test_get_collection_strips_trailing_set_code_and_collector_number():
+    payload = {
+        "data": [
+            {"name": "Sol Ring", "legalities": {"commander": "legal"}},
+            {"name": "Arcane Signet", "legalities": {"commander": "legal"}},
+        ]
+    }
+    with respx.mock(base_url="https://api.scryfall.com") as router:
+        route = router.post("/cards/collection").mock(return_value=httpx.Response(200, json=payload))
+        client = ScryfallClient()
+        try:
+            cards = await client.get_collection(["Sol Ring (OTJ) 251", "Arcane Signet [MKM]148*"])
+        finally:
+            await client.aclose()
+    identifiers = route.calls.last.request.read().decode("utf-8")
+    assert 'Sol Ring' in identifiers
+    assert 'Arcane Signet' in identifiers
+    assert 'OTJ' not in identifiers
+    assert 'MKM' not in identifiers
+    assert [card["name"] for card in cards] == ["Sol Ring", "Arcane Signet"]
+
+
+@pytest.mark.asyncio
+async def test_get_card_strips_trailing_set_code_and_collector_number():
+    with respx.mock(base_url="https://api.scryfall.com") as router:
+        route = router.get("/cards/named").mock(return_value=httpx.Response(200, json=_atraxa()))
+        client = ScryfallClient()
+        try:
+            card = await client.get_card("Atraxa, Praetors' Voice [MUL] 123★")
+        finally:
+            await client.aclose()
+    assert card is not None
+    assert card["name"] == "Atraxa, Praetors' Voice"
+    assert "MUL" not in str(route.calls.last.request.url)
+
+
+@pytest.mark.asyncio
 async def test_get_commander_companion_options_returns_partner_choices():
     tymna = {
         "name": "Tymna the Weaver",

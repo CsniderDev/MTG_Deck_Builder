@@ -327,8 +327,28 @@ async def test_revamp_without_llm_falls_back_with_note():
     )
     result = await builder.revamp(request)
     assert result.source == "heuristic"
-    assert result.version == 2
+    assert result.version == 1
     assert any("LLM unavailable" in n for n in result.notes)
+
+
+@pytest.mark.asyncio
+async def test_revamp_with_unchanged_llm_deck_does_not_increment_version():
+    payload = {
+        "decklist": [{"name": "Sol Ring", "count": 1}],
+        "explanation": "No changes needed.",
+        "substitutions": [],
+    }
+    builder = DeckBuilder(_StubScryfall(), _StubEDHRec(), _StubLLM(payload))
+    request = RevampDeckRequest(
+        commander="Atraxa",
+        bracket=3,
+        prompt="",
+        previous_version=4,
+        previous_decklist=[MagicCard(name="Sol Ring", count=1)],
+        change_request="do basically the same thing",
+    )
+    result = await builder.revamp(request)
+    assert result.version == 4
 
 
 # --- Game-changer enforcement -------------------------------------------

@@ -3,6 +3,8 @@
 - Save current searches to local storage to ensure data is persisted in the tab
 - Ensure mana production mirrors mana costs. right now it seems to be just leveraging an even spread mana base where it needs to better 
   match what the costs are.
+- If a revamp is done, persist the previous decklist and dont default to the heuristic build
+- Add security measures in place to ensure malicious users dont overload APIs or spam requests to the LLM
 
 
 ### 1. "Salt Score" & Power Level Calibration

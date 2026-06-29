@@ -241,6 +241,6 @@ def test_revamp_endpoint_success(client):
     )
     assert response.status_code == 200, response.text
     body = response.json()
-    assert body["version"] == 2
+    assert body["version"] == 1
     assert body["substitutions"] == []
     assert sum(c["count"] for c in body["decklist"]) == 99

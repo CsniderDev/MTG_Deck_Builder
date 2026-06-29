@@ -150,6 +150,32 @@ describe('App', () => {
     expect(fetchSpy).toHaveBeenCalled();
   });
 
+  it('keeps the revamp prompt when the returned deck is unchanged', async () => {
+    vi.spyOn(globalThis, 'fetch').mockImplementation(
+      routedFetch([
+        ['/api/health', jsonResponse({ status: 'ok', llm_enabled: true })],
+        ['/api/decks/build', () => jsonResponse(makeDeckPayload(1))],
+        ['/api/decks/revamp', () => jsonResponse(makeDeckPayload(2))],
+        [/\/api\/cards\/autocomplete/, jsonResponse({ suggestions: [] })],
+      ]),
+    );
+
+    const user = userEvent.setup();
+    render(<App />);
+    await screen.findByText(/with gemini guidance/i);
+    await user.type(screen.getByLabelText(/commander/i), 'Atraxa');
+    await user.type(screen.getByLabelText(/deck concept/i), 'proliferate');
+    await user.click(screen.getByRole('button', { name: /build deck/i }));
+    await screen.findByText(/v1/);
+
+    const revampInput = screen.getByPlaceholderText(/swap out the infinite combos/i);
+    await user.type(revampInput, 'try a different plan');
+    await user.click(screen.getByRole('button', { name: /generate v2/i }));
+
+    expect(await screen.findByText(/v2/)).toBeInTheDocument();
+    expect(revampInput).toHaveValue('try a different plan');
+  });
+
   it('surfaces error messages from the API', async () => {
     vi.spyOn(globalThis, 'fetch').mockImplementation(
       routedFetch([
@@ -205,5 +231,35 @@ describe('App', () => {
     expect(body.previous_version).toBe(0);
     expect(body.change_request).toBe('power it down');
     expect(body.previous_decklist).toEqual([{ name: 'Sol Ring', count: 1 }]);
+  });
+
+  it('strips trailing set code and collector number noise from pasted decklists', async () => {
+    const fetchSpy = vi.spyOn(globalThis, 'fetch').mockImplementation(
+      routedFetch([
+        ['/api/health', jsonResponse({ status: 'ok', llm_enabled: true })],
+        ['/api/decks/revamp', () => jsonResponse(makeDeckPayload(1))],
+        [/\/api\/cards\/autocomplete/, jsonResponse({ suggestions: [] })],
+      ]),
+    );
+
+    const user = userEvent.setup();
+    render(<App />);
+    await screen.findByText(/with gemini guidance/i);
+
+    await user.click(screen.getByRole('tab', { name: /start from existing decklist/i }));
+    await user.type(screen.getByLabelText(/commander/i), 'Atraxa');
+    await user.type(screen.getByLabelText(/what should the ai do to this deck/i), 'clean this up');
+    await user.type(
+      screen.getByLabelText(/existing decklist/i),
+      '1 Atraxa, Praetors\' Voice [ONE] 001{enter}1 Sol Ring (OTJ) 251{enter}1 Arcane Signet [MKM]148*',
+    );
+    await user.click(screen.getByRole('button', { name: /revise decklist/i }));
+
+    await screen.findByText(/v1/);
+    const body = JSON.parse(fetchSpy.mock.calls.find((call) => call[0] === '/api/decks/revamp')[1].body);
+    expect(body.previous_decklist).toEqual([
+      { name: 'Sol Ring', count: 1 },
+      { name: 'Arcane Signet', count: 1 },
+    ]);
   });
 });

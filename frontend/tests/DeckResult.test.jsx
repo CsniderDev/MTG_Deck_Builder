@@ -75,8 +75,8 @@ describe('DeckResult', () => {
     expect(await screen.findByRole('button', { name: /copied/i })).toBeInTheDocument();
   });
 
-  it('submits the change request through onRevamp and clears the textarea', async () => {
-    const onRevamp = vi.fn();
+  it('submits the change request through onRevamp and clears the textarea on success', async () => {
+    const onRevamp = vi.fn().mockResolvedValue(true);
     const user = userEvent.setup();
     render(<DeckResult deck={makeDeck()} onRevamp={onRevamp} revamping={false} />);
 
@@ -86,6 +86,19 @@ describe('DeckResult', () => {
 
     expect(onRevamp).toHaveBeenCalledWith('add two board wipes');
     expect(textarea).toHaveValue('');
+  });
+
+  it('keeps the change request in the field when onRevamp fails', async () => {
+    const onRevamp = vi.fn().mockResolvedValue(false);
+    const user = userEvent.setup();
+    render(<DeckResult deck={makeDeck()} onRevamp={onRevamp} revamping={false} />);
+
+    const textarea = screen.getByPlaceholderText(/swap out the infinite combos/i);
+    await user.type(textarea, 'keep this prompt');
+    await user.click(screen.getByRole('button', { name: /generate v2/i }));
+
+    expect(onRevamp).toHaveBeenCalledWith('keep this prompt');
+    expect(textarea).toHaveValue('keep this prompt');
   });
 
   it('disables revamp button while revamping', () => {
