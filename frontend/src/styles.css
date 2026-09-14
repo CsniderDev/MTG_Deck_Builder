@@ -229,6 +229,30 @@ button.secondary { background: var(--accent-2); color: #0a0c12; }
   border-top: 1px solid rgba(255,255,255,0.06);
 }
 
+.deck-diff__actions {
+  display: flex;
+  justify-content: flex-end;
+  margin-top: 12px;
+}
+
+.deck-diff__revert-button {
+  border: 1px solid rgba(255, 107, 107, 0.35);
+  background: rgba(255, 107, 107, 0.08);
+  color: var(--text);
+  border-radius: 999px;
+  padding: 8px 14px;
+  font-size: 13px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: background 0.18s ease, border-color 0.18s ease, transform 0.18s ease;
+}
+
+.deck-diff__revert-button:hover {
+  background: rgba(255, 107, 107, 0.14);
+  border-color: rgba(255, 107, 107, 0.5);
+  transform: translateY(-1px);
+}
+
 @media (max-width: 768px) {
   .deck-diff__swap {
     grid-template-columns: 1fr;

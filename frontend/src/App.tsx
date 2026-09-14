@@ -5,6 +5,7 @@ import { buildDeck, fetchHealth, revampDeck, fetchBannedListAndGamechangers } fr
 import type {
   BuildDeckPayload,
   DeckFormMode,
+  DeckSubstitution,
   DeckResponse,
   ExistingDeckActionPayload,
   HealthStatus,
@@ -28,6 +29,80 @@ function deckIdentitySignature(deck: DeckResponse): string {
     secondary_commander: deck.secondary_commander?.name?.trim().toLowerCase() || '',
     decklist: library,
   });
+}
+
+function normalizedCardKey(name: string): string {
+  /** Build a stable key for matching deck cards by name regardless of case/spacing. */
+  return name.trim().toLowerCase();
+}
+
+function cloneMagicCard(card: MagicCard, countOverride?: number): MagicCard {
+  /** Clone a card row so local deck edits do not mutate shared response objects. */
+  return {
+    ...card,
+    colors: card.colors ? [...card.colors] : undefined,
+    color_identity: card.color_identity ? [...card.color_identity] : undefined,
+    produced_mana: card.produced_mana ? [...card.produced_mana] : undefined,
+    image_uris: card.image_uris ? { ...card.image_uris } : undefined,
+    card_faces: card.card_faces?.map((face) => ({
+      ...face,
+      image_uris: face.image_uris ? { ...face.image_uris } : undefined,
+    })),
+    count: countOverride ?? card.count,
+  };
+}
+
+function toCompactDecklistPayload(cards: MagicCard[]): MagicCard[] {
+  /** Reduce deck cards to the minimal payload needed for revamp requests. */
+  return cards.map((card) => ({
+    name: card.name,
+    count: card.count,
+    category: card.category,
+  }));
+}
+
+function applySubstitutionRevert(
+  deck: DeckResponse,
+  substitution: DeckSubstitution,
+  previousLibrary: MagicCard[] | null,
+): DeckResponse {
+  /** Locally undo one substitution by removing added cards and restoring removed cards. */
+  const cardsByKey = new Map<string, MagicCard>(
+    deck.decklist.map((card) => [normalizedCardKey(card.name), cloneMagicCard(card)]),
+  );
+  const previousCardsByKey = new Map<string, MagicCard>(
+    (previousLibrary ?? []).map((card) => [normalizedCardKey(card.name), card]),
+  );
+
+  for (const card of substitution.added) {
+    const key = normalizedCardKey(card.name);
+    const existing = cardsByKey.get(key);
+    if (!existing) continue;
+    const nextCount = (existing.count || 1) - (card.count || 1);
+    if (nextCount > 0) {
+      cardsByKey.set(key, cloneMagicCard(existing, nextCount));
+    } else {
+      cardsByKey.delete(key);
+    }
+  }
+
+  for (const card of substitution.removed) {
+    const key = normalizedCardKey(card.name);
+    const existing = cardsByKey.get(key);
+    const previousCard = previousCardsByKey.get(key);
+    if (existing) {
+      cardsByKey.set(key, cloneMagicCard(existing, (existing.count || 1) + (card.count || 1)));
+      continue;
+    }
+    const baseCard = previousCard ?? card;
+    cardsByKey.set(key, cloneMagicCard(baseCard, card.count || 1));
+  }
+
+  return {
+    ...deck,
+    decklist: [...cardsByKey.values()],
+    substitutions: deck.substitutions.filter((candidate) => candidate !== substitution),
+  };
 }
 
 function scrubDecklistCardName(rawName: string): string {
@@ -71,6 +146,7 @@ function parseDecklistText(decklistText: string, commanderNames: string[]): Magi
 export default function App(): React.ReactElement {
   /** Render the top-level deck-builder UI and coordinate build/revamp workflows. */
   const [newDeck, setNewDeck] = useState<DeckResponse | null>(null);
+  const [previousLibraryForCurrentDeck, setPreviousLibraryForCurrentDeck] = useState<MagicCard[] | null>(null);
   const [workflow, setWorkflow] = useState<DeckFormMode>('build');
   const [buildFormState, setBuildFormState] = useState<BuildDeckPayload | null>(null);
   const [existingFormState, setExistingFormState] = useState<ExistingDeckActionPayload | null>(null);
@@ -113,6 +189,7 @@ export default function App(): React.ReactElement {
     try {
       const result = await buildDeck(values);
       setNewDeck(result);
+      setPreviousLibraryForCurrentDeck(null);
       setSession({ mode: 'build', values });
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
@@ -141,6 +218,7 @@ export default function App(): React.ReactElement {
         change_request: values.prompt,
       });
       setNewDeck(result);
+      setPreviousLibraryForCurrentDeck(previousDecklist.map((card) => cloneMagicCard(card)));
       setSession({ mode: 'existing', values });
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
@@ -165,6 +243,7 @@ export default function App(): React.ReactElement {
     setError('');
     try {
       const previousDeckSignature = deckIdentitySignature(newDeck);
+      const previousLibrary = newDeck.decklist.map((card) => cloneMagicCard(card));
       const basePayload = {
         commander: session.values.commander,
         secondary_commander: session.values.secondary_commander,
@@ -173,11 +252,12 @@ export default function App(): React.ReactElement {
         gamechangers,
         banned_list: bannedList,
         previous_version: newDeck.version,
-        previous_decklist: newDeck.decklist,
+        previous_decklist: toCompactDecklistPayload(newDeck.decklist),
         change_request: changeRequest,
       };
       const result = await revampDeck(basePayload);
       setNewDeck(result);
+      setPreviousLibraryForCurrentDeck(previousLibrary);
       return deckIdentitySignature(result) !== previousDeckSignature;
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
@@ -185,6 +265,14 @@ export default function App(): React.ReactElement {
     } finally {
       setRevamping(false);
     }
+  }
+
+  function handleRevertSubstitution(substitution: DeckSubstitution): void {
+    /** Locally undo one displayed substitution so the user can reject a specific swap. */
+    setNewDeck((currentDeck) => {
+      if (!currentDeck) return currentDeck;
+      return applySubstitutionRevert(currentDeck, substitution, previousLibraryForCurrentDeck);
+    });
   }
 
   return (
@@ -230,7 +318,14 @@ export default function App(): React.ReactElement {
           initial={workflow === 'build' ? buildFormState : existingFormState}
         />
         {error && <div className="error">{error}</div>}
-        {newDeck && <DeckResult deck={newDeck} onRevamp={handleRevamp} revamping={revamping} />}
+        {newDeck && (
+          <DeckResult
+            deck={newDeck}
+            onRevamp={handleRevamp}
+            onRevertSubstitution={handleRevertSubstitution}
+            revamping={revamping}
+          />
+        )}
       </main>
     </div>
   );

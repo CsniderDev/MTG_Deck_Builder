@@ -4,6 +4,7 @@ import MagicCardItem from './MagicCard';
 
 export interface DeckDiffProps {
   substitutions: DeckSubstitution[];
+  onRevertSubstitution: (substitution: DeckSubstitution) => void;
 }
 
 function formatSwapCards(cards: MagicCard[]): string {
@@ -13,7 +14,10 @@ function formatSwapCards(cards: MagicCard[]): string {
     .join(', ');
 }
 
-export default function DeckDiff({ substitutions }: DeckDiffProps): React.ReactElement | null {
+export default function DeckDiff({
+  substitutions,
+  onRevertSubstitution,
+}: DeckDiffProps): React.ReactElement | null {
   /** Render the LLM's substitution-by-substitution explanation for a deck revision. */
   if (!substitutions.length) {
     return null;
@@ -55,6 +59,15 @@ export default function DeckDiff({ substitutions }: DeckDiffProps): React.ReactE
               </div>
             </div>
             <p className="deck-diff__reason">{substitution.explanation}</p>
+            <div className="deck-diff__actions">
+              <button
+                type="button"
+                className="deck-diff__revert-button"
+                onClick={() => onRevertSubstitution(substitution)}
+              >
+                Revert this swap
+              </button>
+            </div>
           </article>
         ))}
       </div>

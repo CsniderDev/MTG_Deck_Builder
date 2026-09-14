@@ -1,5 +1,5 @@
 import React, { useMemo, useState } from 'react';
-import type { DeckResponse, MagicCard } from '../types';
+import type { DeckResponse, DeckSubstitution, MagicCard } from '../types';
 import MagicCardItem from './MagicCard';
 import DeckStats from './DeckStats';
 import DeckDiff from './DeckDiff';
@@ -25,12 +25,14 @@ function buildDeckText(deck: DeckResponse): string {
 export interface DeckResultProps {
   deck: DeckResponse;
   onRevamp: (changeRequest: string) => Promise<boolean>;
+  onRevertSubstitution: (substitution: DeckSubstitution) => void;
   revamping?: boolean;
 }
 
 export default function DeckResult({
   deck,
   onRevamp,
+  onRevertSubstitution,
   revamping,
 }: DeckResultProps): React.ReactElement {
   /** Render the current deck, explanation, and revamp controls. */
@@ -106,7 +108,9 @@ export default function DeckResult({
       </header>
 
       <DeckStats deck={deck} />
-      {deck?.substitutions?.length ? <DeckDiff substitutions={deck.substitutions} /> : null}
+      {deck?.substitutions?.length ? (
+        <DeckDiff substitutions={deck.substitutions} onRevertSubstitution={onRevertSubstitution} />
+      ) : null}
       <div className="deck-result__body">
         <div className="deck-list">
           {[...grouped.entries()].map(([cat, cards]) => (

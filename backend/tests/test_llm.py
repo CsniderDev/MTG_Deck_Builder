@@ -1,4 +1,4 @@
-from app.services.llm import LLMService
+from app.services.llm import LLMService, _compact_decklist_for_prompt, _is_retryable_gemini_error
 
 
 def test_extract_json_plain():
@@ -34,3 +34,21 @@ def test_service_disabled_without_key(monkeypatch):
     get_settings.cache_clear()
     svc = LLMService()
     assert svc.enabled is False
+
+
+def test_compact_decklist_for_prompt_keeps_only_core_fields():
+    compact = _compact_decklist_for_prompt([
+        {
+            "name": "Sol Ring",
+            "count": 1,
+            "category": "Ramp",
+            "oracle_text": "Add mana.",
+            "image_uris": {"normal": "https://img.test/sol-ring.jpg"},
+        }
+    ])
+    assert compact == [{"name": "Sol Ring", "count": 1, "category": "Ramp"}]
+
+
+def test_is_retryable_gemini_error_detects_unavailable_text():
+    assert _is_retryable_gemini_error(RuntimeError("503 UNAVAILABLE")) is True
+    assert _is_retryable_gemini_error(RuntimeError("hard failure")) is False

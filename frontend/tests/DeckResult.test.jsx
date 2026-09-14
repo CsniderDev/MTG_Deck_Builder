@@ -26,7 +26,7 @@ function makeDeck(overrides = {}) {
 
 describe('DeckResult', () => {
   it('renders commander, version badge, bracket, source and total count', () => {
-    render(<DeckResult deck={makeDeck()} onRevamp={() => {}} revamping={false} />);
+    render(<DeckResult deck={makeDeck()} onRevamp={() => {}} onRevertSubstitution={() => {}} revamping={false} />);
     expect(screen.getByRole('heading', { name: /Atraxa, Praetors' Voice/ })).toBeInTheDocument();
     expect(screen.getByText(/v1/)).toBeInTheDocument();
     expect(screen.getByText(/Bracket 3/)).toBeInTheDocument();
@@ -36,7 +36,7 @@ describe('DeckResult', () => {
   });
 
   it('groups cards by category', () => {
-    render(<DeckResult deck={makeDeck()} onRevamp={() => {}} revamping={false} />);
+    render(<DeckResult deck={makeDeck()} onRevamp={() => {}} onRevertSubstitution={() => {}} revamping={false} />);
     expect(screen.getByRole('heading', { name: /^Ramp$/i })).toBeInTheDocument();
     expect(screen.getByRole('heading', { name: /^Removal$/i })).toBeInTheDocument();
     expect(screen.getByRole('heading', { name: /^Land$/i })).toBeInTheDocument();
@@ -45,12 +45,12 @@ describe('DeckResult', () => {
   });
 
   it('renders each note', () => {
-    render(<DeckResult deck={makeDeck()} onRevamp={() => {}} revamping={false} />);
+    render(<DeckResult deck={makeDeck()} onRevamp={() => {}} onRevertSubstitution={() => {}} revamping={false} />);
     expect(screen.getByText(/Padded 90 basic lands/)).toBeInTheDocument();
   });
 
   it('renders multi-paragraph explanation', () => {
-    render(<DeckResult deck={makeDeck()} onRevamp={() => {}} revamping={false} />);
+    render(<DeckResult deck={makeDeck()} onRevamp={() => {}} onRevertSubstitution={() => {}} revamping={false} />);
     expect(screen.getByText('First paragraph.')).toBeInTheDocument();
     expect(screen.getByText('Second paragraph.')).toBeInTheDocument();
   });
@@ -64,7 +64,7 @@ describe('DeckResult', () => {
       configurable: true,
     });
 
-    render(<DeckResult deck={makeDeck()} onRevamp={() => {}} revamping={false} />);
+    render(<DeckResult deck={makeDeck()} onRevamp={() => {}} onRevertSubstitution={() => {}} revamping={false} />);
     await user.click(screen.getByRole('button', { name: /copy decklist/i }));
 
     expect(writeText).toHaveBeenCalledTimes(1);
@@ -78,7 +78,7 @@ describe('DeckResult', () => {
   it('submits the change request through onRevamp and clears the textarea on success', async () => {
     const onRevamp = vi.fn().mockResolvedValue(true);
     const user = userEvent.setup();
-    render(<DeckResult deck={makeDeck()} onRevamp={onRevamp} revamping={false} />);
+    render(<DeckResult deck={makeDeck()} onRevamp={onRevamp} onRevertSubstitution={() => {}} revamping={false} />);
 
     const textarea = screen.getByPlaceholderText(/swap out the infinite combos/i);
     await user.type(textarea, 'add two board wipes');
@@ -91,7 +91,7 @@ describe('DeckResult', () => {
   it('keeps the change request in the field when onRevamp fails', async () => {
     const onRevamp = vi.fn().mockResolvedValue(false);
     const user = userEvent.setup();
-    render(<DeckResult deck={makeDeck()} onRevamp={onRevamp} revamping={false} />);
+    render(<DeckResult deck={makeDeck()} onRevamp={onRevamp} onRevertSubstitution={() => {}} revamping={false} />);
 
     const textarea = screen.getByPlaceholderText(/swap out the infinite combos/i);
     await user.type(textarea, 'keep this prompt');
@@ -102,13 +102,13 @@ describe('DeckResult', () => {
   });
 
   it('disables revamp button while revamping', () => {
-    render(<DeckResult deck={makeDeck({ version: 2 })} onRevamp={() => {}} revamping={true} />);
+    render(<DeckResult deck={makeDeck({ version: 2 })} onRevamp={() => {}} onRevertSubstitution={() => {}} revamping={true} />);
     const button = screen.getByRole('button', { name: /revamping/i });
     expect(button).toBeDisabled();
   });
 
   it('shows version badge for higher iterations', () => {
-    render(<DeckResult deck={makeDeck({ version: 4 })} onRevamp={() => {}} revamping={false} />);
+    render(<DeckResult deck={makeDeck({ version: 4 })} onRevamp={() => {}} onRevertSubstitution={() => {}} revamping={false} />);
     expect(screen.getByText(/v4/)).toBeInTheDocument();
     expect(screen.getByRole('button', { name: /generate v5/i })).toBeInTheDocument();
   });
@@ -116,10 +116,35 @@ describe('DeckResult', () => {
   it('does not call onRevamp when change request is empty', async () => {
     const onRevamp = vi.fn();
     const user = userEvent.setup();
-    render(<DeckResult deck={makeDeck()} onRevamp={onRevamp} revamping={false} />);
+    render(<DeckResult deck={makeDeck()} onRevamp={onRevamp} onRevertSubstitution={() => {}} revamping={false} />);
     const button = screen.getByRole('button', { name: /generate v2/i });
     expect(button).toBeDisabled();
     await user.click(button);
     expect(onRevamp).not.toHaveBeenCalled();
+  });
+
+  it('renders substitution revert controls and forwards clicks', async () => {
+    const onRevertSubstitution = vi.fn();
+    const user = userEvent.setup();
+    render(
+      <DeckResult
+        deck={makeDeck({
+          substitutions: [
+            {
+              removed: [{ name: 'Cultivate', count: 1, category: 'Ramp' }],
+              added: [{ name: "Nature's Lore", count: 1, category: 'Ramp' }],
+              explanation: 'Lower the curve.',
+            },
+          ],
+        })}
+        onRevamp={() => Promise.resolve(true)}
+        onRevertSubstitution={onRevertSubstitution}
+        revamping={false}
+      />,
+    );
+
+    await user.click(screen.getByRole('button', { name: /revert this swap/i }));
+    expect(onRevertSubstitution).toHaveBeenCalledTimes(1);
+    expect(onRevertSubstitution.mock.calls[0][0].removed[0].name).toBe('Cultivate');
   });
 });

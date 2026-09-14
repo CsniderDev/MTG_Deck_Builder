@@ -106,6 +106,7 @@ describe('App', () => {
     expect(revampBody.commander).toBe('Atraxa');
     expect(revampBody.previous_version).toBe(1);
     expect(revampBody.change_request).toBe('fewer combos');
+    expect(revampBody.previous_decklist).toEqual([{ name: 'Sol Ring', count: 1, category: 'Ramp' }]);
   });
 
   it('renders LLM substitution explanations after a revamp', async () => {
@@ -148,6 +149,58 @@ describe('App', () => {
     expect(screen.getByText(/^Nature's Lore$/)).toBeInTheDocument();
     expect(screen.getByText(/ramps earlier and keeps the mana curve lower/i)).toBeInTheDocument();
     expect(fetchSpy).toHaveBeenCalled();
+  });
+
+  it('can locally revert an unwanted substitution from the diff panel', async () => {
+    vi.spyOn(globalThis, 'fetch').mockImplementation(
+      routedFetch([
+        ['/api/health', jsonResponse({ status: 'ok', llm_enabled: true })],
+        [
+          '/api/decks/build',
+          () =>
+            jsonResponse({
+              ...makeDeckPayload(1),
+              decklist: [{ name: 'Cultivate', count: 1, category: 'Ramp' }],
+            }),
+        ],
+        [
+          '/api/decks/revamp',
+          () =>
+            jsonResponse({
+              ...makeDeckPayload(2),
+              decklist: [{ name: "Nature's Lore", count: 1, category: 'Ramp' }],
+              substitutions: [
+                {
+                  removed: [{ name: 'Cultivate', count: 1, category: 'Ramp' }],
+                  added: [{ name: "Nature's Lore", count: 1, category: 'Ramp' }],
+                  explanation: 'Nature\'s Lore ramps faster.',
+                },
+              ],
+            }),
+        ],
+        [/\/api\/cards\/autocomplete/, jsonResponse({ suggestions: [] })],
+      ]),
+    );
+
+    const user = userEvent.setup();
+    render(<App />);
+    await screen.findByText(/with gemini guidance/i);
+
+    await user.type(screen.getByLabelText(/commander/i), 'Atraxa');
+    await user.type(screen.getByLabelText(/deck concept/i), 'proliferate');
+    await user.click(screen.getByRole('button', { name: /build deck/i }));
+    await screen.findByText(/v1/);
+
+    await user.type(screen.getByPlaceholderText(/swap out the infinite combos/i), 'better ramp');
+    await user.click(screen.getByRole('button', { name: /generate v2/i }));
+
+    await screen.findByRole('button', { name: /revert this swap/i });
+    await user.click(screen.getByRole('button', { name: /revert this swap/i }));
+
+    expect(screen.queryByText(/^Nature's Lore$/)).not.toBeInTheDocument();
+    expect(screen.getByText(/Cultivate/)).toBeInTheDocument();
+    expect(screen.queryByText(/LLM substitutions/i)).not.toBeInTheDocument();
+    expect(screen.getByText(/v2/)).toBeInTheDocument();
   });
 
   it('keeps the revamp prompt when the returned deck is unchanged', async () => {

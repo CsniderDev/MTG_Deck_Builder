@@ -7,12 +7,14 @@ any LLM credentials.
 """
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import re
 from typing import Any, Iterable, Optional
 
 from google import genai
+from google.genai import errors as genai_errors
 from google.genai import types as genai_types
 
 from ..config import get_settings
@@ -103,6 +105,36 @@ def _gamechanger_block(
     )
 
 
+def _compact_decklist_for_prompt(previous_decklist: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Reduce a hydrated decklist to the minimal fields Gemini needs for revisions."""
+    compact_cards: list[dict[str, Any]] = []
+    for card in previous_decklist:
+        if not isinstance(card, dict):
+            continue
+        name = str(card.get("name") or "").strip()
+        if not name:
+            continue
+        compact_card: dict[str, Any] = {
+            "name": name,
+            "count": int(card.get("count") or 1),
+        }
+        category = card.get("category")
+        if category:
+            compact_card["category"] = str(category)
+        compact_cards.append(compact_card)
+    return compact_cards
+
+
+def _is_retryable_gemini_error(exc: Exception) -> bool:
+    """Return True for transient Gemini availability failures worth retrying once or twice."""
+    if isinstance(exc, genai_errors.ServerError):
+        status = getattr(exc, "status_code", None)
+        if status in {429, 500, 503, 504}:
+            return True
+    message = str(exc).upper()
+    return any(token in message for token in ("503", "UNAVAILABLE", "RESOURCE_EXHAUSTED", "429"))
+
+
 class LLMService:
     def __init__(self) -> None:
         """Initialize the Gemini client when an API key is configured."""
@@ -163,6 +195,7 @@ class LLMService:
         if not self._enabled or self._client is None:
             return None
         gc_block = _gamechanger_block(gamechanger_limit, gamechangers)
+        compact_previous_decklist = _compact_decklist_for_prompt(previous_decklist)
 
 
         prompt = (
@@ -174,7 +207,7 @@ class LLMService:
             f"User change request: {change_request}\n\n"
             f"Here is a current list of banned cards. DO NOT include any of these cards at all:\n{json.dumps(list(banned_list or []))}\n\n"
             f"{gc_block}"
-            f"Current decklist (99 cards, JSON):\n{json.dumps(previous_decklist)}\n\n"
+            f"Current decklist (99 cards, compact JSON):\n{json.dumps(compact_previous_decklist)}\n\n"
             f"Produce a revised 99-card decklist applying the change request while "
             f"keeping the deck coherent and legal. For every meaningful swap, include "
             f"a substitution entry listing the removed card(s), the added card(s), and "
@@ -247,16 +280,32 @@ class LLMService:
         logger.info(
             "Gemini request: model=%s prompt_chars=%d", self._model_name, len(prompt)
         )
-        try:
-            response = await self._client.aio.models.generate_content(
-                model=self._model_name,
-                contents=prompt,
-                config=genai_types.GenerateContentConfig(
-                    response_mime_type="application/json",
-                ),
-            )
-        except Exception as exc:  # noqa: BLE001 - propagate as None, log details
-            logger.exception("Gemini request raised: %s", exc)
+        response = None
+        retry_delays = [0.0, 0.75, 1.5]
+        for attempt, delay in enumerate(retry_delays, start=1):
+            if delay:
+                await asyncio.sleep(delay)
+            try:
+                response = await self._client.aio.models.generate_content(
+                    model=self._model_name,
+                    contents=prompt,
+                    config=genai_types.GenerateContentConfig(
+                        response_mime_type="application/json",
+                    ),
+                )
+                break
+            except Exception as exc:  # noqa: BLE001 - propagate as None, log details
+                if _is_retryable_gemini_error(exc) and attempt < len(retry_delays):
+                    logger.warning(
+                        "Gemini request attempt %d/%d failed with a retryable error: %s",
+                        attempt,
+                        len(retry_delays),
+                        exc,
+                    )
+                    continue
+                logger.exception("Gemini request raised: %s", exc)
+                return None
+        if response is None:
             return None
         text = (getattr(response, "text", "") or "").strip()
         if not text:
