@@ -140,6 +140,11 @@ def _classify_llm_error(exc: Exception) -> str:
         return "the configured model was not found - check the model setting on the server"
     if "TIMEOUT" in message or "TIMED OUT" in message:
         return "the request to the model timed out"
+    if isinstance(status, int) and 400 <= status < 500:
+        # Status enum (e.g. INVALID_ARGUMENT) is a fixed vocabulary, safe to show.
+        enum = getattr(exc, "status", None)
+        suffix = f" {enum}" if isinstance(enum, str) and enum.isupper() else ""
+        return f"the provider rejected the request ({status}{suffix}) - see server logs"
     return f"unexpected error calling the model ({type(exc).__name__})"
 
 

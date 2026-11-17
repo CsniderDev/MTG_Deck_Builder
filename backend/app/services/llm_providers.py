@@ -49,9 +49,15 @@ class GeminiProvider:
 
     def __init__(self, api_key: str, model: str) -> None:
         from google import genai
+        from google.genai import types as genai_types
 
         self.model = model
-        self._client = genai.Client(api_key=api_key)
+        # Pin the API version: google-genai 3.x defaults to "v1", which rejects JSON mode
+        # ("JSON mode is not enabled for api version v1"). v1beta works on 2.x and 3.x.
+        self._client = genai.Client(
+            api_key=api_key,
+            http_options=genai_types.HttpOptions(api_version="v1beta"),
+        )
 
     async def generate_json_text(self, prompt: str) -> str:
         from google.genai import types as genai_types
