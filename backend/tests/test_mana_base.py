@@ -192,10 +192,10 @@ class _FixedLLM:
     last_failure_reason = None
 
     async def build_deck(self, **kwargs):
-        # An even 10/10 basic split the balancer should correct to 75/25 (R:3, G:1).
+        # An even 18/18 basic split the balancer should correct to 75/25 (R:3, G:1).
         decklist = [{"name": "Red Card", "count": 1}, {"name": "Green Card", "count": 1}]
-        decklist += [{"name": f"Filler {i}", "count": 1} for i in range(77)]
-        decklist += [{"name": "Mountain", "count": 10}, {"name": "Forest", "count": 10}]
+        decklist += [{"name": f"Filler {i}", "count": 1} for i in range(61)]
+        decklist += [{"name": "Mountain", "count": 18}, {"name": "Forest", "count": 18}]
         return {"decklist": decklist, "explanation": "test", "notes": [], "substitutions": []}
 
 
@@ -204,9 +204,9 @@ async def test_build_rebalances_llm_basics_to_pip_share():
     builder = DeckBuilder(_ColoredScryfall(), _NoEdhrec(), _FixedLLM())
     response = await builder.build(BuildDeckRequest(commander="Test", bracket=3, prompt="go"))
     lands = {c.name: c.count for c in response.decklist if c.name in {"Mountain", "Forest"}}
-    assert lands == {"Mountain": 15, "Forest": 5}
+    assert lands == {"Mountain": 27, "Forest": 9}
     assert sum(c.count for c in response.decklist) == 99
-    assert any("Balanced 20 basic lands" in note for note in response.notes)
+    assert any("Balanced 36 basic lands" in note for note in response.notes)
 
 
 
@@ -293,3 +293,124 @@ def test_balance_accounts_for_nonbasic_sources():
     assert counts == {"Mountain": 8, "Forest": 2}
     assert "after counting nonbasic lands, mana rocks and dorks" in notes[0]
     assert "Colored sources now: R 8, G 8" in notes[0]
+
+
+# --- land-count guard ---------------------------------------------------------------
+
+
+class _GuardScryfall(_ColoredScryfall):
+    """Names starting with 'Land' are nonbasic lands; 'Spell' / EDHREC picks are sorceries."""
+
+    def _card(self, name):
+        card = super()._card(name)
+        if name.startswith("Land") or name == "EDHREC Land":
+            card["type_line"] = "Land"
+            card["mana_cost"] = ""
+        return card
+
+
+class _GuardEdhrec:
+    async def commander_page(self, name):
+        return {}
+
+    @staticmethod
+    def extract_recommendations(page):
+        return {
+            "Lands": [{"name": "Should Not Pick (land header)", "num_decks": 99999}],
+            "Top Cards": [
+                {"name": "EDHREC Land", "num_decks": 5000},  # a land in a mixed group: skipped
+                {"name": "Popular Spell", "num_decks": 4000},
+                {"name": "Banned Spell", "num_decks": 3500},
+                {"name": "Red Card", "num_decks": 3000},  # already in the deck
+            ],
+            "Creatures": [
+                {"name": "Second Spell", "num_decks": 2000},
+                {"name": "Third Spell", "num_decks": 1000},
+                {"name": "Fourth Spell", "num_decks": 500},
+            ],
+        }
+
+    async def aclose(self):
+        pass
+
+
+class _ListLLM(_FixedLLM):
+    def __init__(self, decklist):
+        self._decklist = decklist
+
+    async def build_deck(self, **kwargs):
+        return {"decklist": self._decklist, "explanation": "test", "notes": [], "substitutions": []}
+
+
+def _lands_in(response):
+    return sum(c.count for c in response.decklist if c.type_line and "Land" in c.type_line)
+
+
+@pytest.mark.asyncio
+async def test_too_few_lands_swaps_last_spells_for_basics():
+    decklist = [{"name": "Red Card"}, {"name": "Green Card"}]
+    decklist += [{"name": f"Spell {i}"} for i in range(67)]
+    decklist += [{"name": f"Land {i}"} for i in range(10)] + [{"name": "Mountain", "count": 20}]
+    builder = DeckBuilder(_GuardScryfall(), _NoEdhrec(), _ListLLM(decklist))
+    response = await builder.build(BuildDeckRequest(commander="Test", bracket=3, prompt="go"))
+
+    names = {c.name for c in response.decklist}
+    assert sum(c.count for c in response.decklist) == 99
+    assert _lands_in(response) == 34
+    # The 4 cuts come from the end of the spell list; the first spells survive.
+    assert {"Spell 63", "Spell 64", "Spell 65", "Spell 66"}.isdisjoint(names)
+    assert {"Red Card", "Green Card", "Spell 0"} <= names
+    assert any("Deck had only 30 lands" in n and "Spell 66" in n for n in response.notes)
+
+
+@pytest.mark.asyncio
+async def test_too_many_lands_swaps_basics_for_top_edhrec_spells():
+    decklist = [{"name": "Red Card"}, {"name": "Green Card"}]
+    decklist += [{"name": f"Spell {i}"} for i in range(53)]
+    decklist += [{"name": f"Land {i}"} for i in range(4)] + [{"name": "Mountain", "count": 40}]
+    builder = DeckBuilder(_GuardScryfall(), _GuardEdhrec(), _ListLLM(decklist))
+    response = await builder.build(
+        BuildDeckRequest(commander="Test", bracket=3, prompt="go", banned_list=["Banned Spell"])
+    )
+
+    names = {c.name for c in response.decklist}
+    assert sum(c.count for c in response.decklist) == 99
+    assert _lands_in(response) == 40
+    assert {"Popular Spell", "Second Spell", "Third Spell", "Fourth Spell"} <= names
+    assert not {"Banned Spell", "EDHREC Land", "Should Not Pick (land header)"} & names
+    # Basics absorb the cuts; nonbasic lands are kept.
+    assert all(f"Land {i}" in names for i in range(4))
+    assert any("Deck had 44 lands" in n and "Popular Spell" in n for n in response.notes)
+
+
+@pytest.mark.asyncio
+async def test_land_count_in_range_is_left_alone():
+    decklist = [{"name": "Red Card"}, {"name": "Green Card"}]
+    decklist += [{"name": f"Spell {i}"} for i in range(60)]
+    decklist += [{"name": "Mountain", "count": 37}]
+    builder = DeckBuilder(_GuardScryfall(), _GuardEdhrec(), _ListLLM(decklist))
+    response = await builder.build(BuildDeckRequest(commander="Test", bracket=3, prompt="go"))
+    assert _lands_in(response) == 37
+    assert not any("lands (more than" in n or "Deck had only" in n for n in response.notes)
+
+
+def test_swap_skips_mana_rocks_and_dorks_unless_nothing_else():
+    from app.services.deck_builder import _swap_spells_for_basics
+
+    deck = [
+        _spell("Removal", "{R}"),
+        _spell("Card Draw", "{G}"),
+        _source("Arcane Signet", "Artifact", ["R", "G"]),
+        _source("Sol Ring", "Artifact", ["C"]),
+        _basic("Mountain", 30),
+    ]
+    notes = []
+    _swap_spells_for_basics(deck, {"R", "G"}, 2, 30, notes)
+    names = {c.name for c in deck}
+    assert {"Arcane Signet", "Sol Ring"} <= names  # ramp kept
+    assert not {"Removal", "Card Draw"} & names  # other spells cut instead
+    assert next(c for c in deck if c.name == "Mountain").count == 32
+
+    # With only ramp left to cut, it is used as a last resort.
+    _swap_spells_for_basics(deck, {"R", "G"}, 1, 32, notes)
+    assert next(c for c in deck if c.name == "Mountain").count == 33

@@ -244,7 +244,10 @@ async def test_build_without_llm_uses_heuristic():
 @pytest.mark.asyncio
 async def test_build_with_full_llm_payload_reuses_validation_collection_for_hydration():
     payload = {
-        "decklist": [{"name": f"Card {i}", "count": 1, "category": "Misc"} for i in range(99)],
+        # 63 spells + 36 basics already split to Atraxa's even WUBG needs, so neither the
+        # land-count guard nor the color balance adds cards that need another lookup.
+        "decklist": [{"name": f"Card {i}", "count": 1, "category": "Misc"} for i in range(63)]
+        + [{"name": basic, "count": 9, "category": "Land"} for basic in ("Plains", "Island", "Swamp", "Forest")],
         "explanation": "Fast plan.",
     }
     scryfall = _StubScryfall()

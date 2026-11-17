@@ -190,9 +190,15 @@ class DeckBuilder:
             prefetched_cards,
         )
         decklist = await self._hydrate_cards(decklist, prefetched_cards)
-        decklist = await self._balance_basics(
-            decklist, [c for c in (commander_card, secondary_commander_card) if c], notes
+        command_cards = [c for c in (commander_card, secondary_commander_card) if c]
+        decklist = await self._enforce_land_count(
+            decklist,
+            command_cards,
+            recommendations,
+            banned_list | (gamechangers or {name.lower() for name in GAMECHANGERS}),
+            notes,
         )
+        decklist = await self._balance_basics(decklist, command_cards, notes)
         substitutions = await self._hydrate_substitutions(substitutions, prefetched_cards)
         response = DeckResponse(
             version=1,
@@ -352,6 +358,56 @@ class DeckBuilder:
         )
         self._cache_set(cache_key, response)
         return response
+
+    async def _enforce_land_count(
+        self,
+        decklist: list[MagicCard],
+        command_zone: list[dict[str, Any]],
+        recommendations: dict[str, list[dict[str, Any]]],
+        excluded_names: set[str],
+        notes: list[str],
+    ) -> list[MagicCard]:
+        """Keep a built deck between ``_MIN_LANDS`` and ``_MAX_LANDS`` lands (needs hydrated types).
+
+        Too few lands: the lowest-priority spells (end of the list) become basics.
+        Too many: excess lands (basics from the largest pile first) are swapped for the
+        most-played EDHREC spells not already in the deck. The deck size is unchanged;
+        ``_balance_basics`` then decides which colors the basics should be.
+        """
+        identity: set[str] = set()
+        for commander in command_zone:
+            identity.update(commander.get("color_identity") or [])
+        lands = _land_count(decklist)
+
+        if lands < _MIN_LANDS:
+            added = _swap_spells_for_basics(decklist, identity, _MIN_LANDS - lands, lands, notes)
+            if added:
+                await self._hydrate_cards(added)
+            return decklist
+
+        if lands > _MAX_LANDS:
+            excess = lands - _MAX_LANDS
+            in_deck = {card.name.lower() for card in decklist}
+            in_deck.update((c.get("name") or "").lower() for c in command_zone)
+            candidates = _spell_candidates(recommendations, in_deck | excluded_names)
+            # Hydrate a few spares: EDHREC's mixed groups can still contain lands.
+            pool = [MagicCard(name=name, count=1, category=header) for name, header in candidates[: excess * 3]]
+            if pool:
+                await self._hydrate_cards(pool)
+            picks = [card for card in pool if card.type_line and not _is_land(card)][:excess]
+            if not picks:
+                notes.append(
+                    f"Deck has {lands} lands (more than {_MAX_LANDS}); no replacement spells were "
+                    "available, so consider cutting a few lands yourself."
+                )
+                return decklist
+            removed = _remove_lands(decklist, len(picks))
+            decklist.extend(picks)
+            notes.append(
+                f"Deck had {lands} lands (more than {_MAX_LANDS}); swapped {_describe(removed)} for "
+                f"popular EDHREC picks: {', '.join(card.name for card in picks)}."
+            )
+        return decklist
 
     async def _balance_basics(
         self,
@@ -733,6 +789,103 @@ def _is_land(card: MagicCard) -> bool:
     if card.type_line:
         return "Land" in card.type_line
     return "land" in (card.category or "").lower()
+
+
+# A normal Commander land count, MDFCs with a land face included. The LLM is asked
+# for 35-38; these bounds only catch clear outliers.
+_MIN_LANDS = 34
+_MAX_LANDS = 40
+
+
+def _land_count(deck: Iterable[MagicCard]) -> int:
+    return sum(card.count for card in deck if _is_land(card))
+
+
+def _describe(cards: list[tuple[str, int]]) -> str:
+    """Render [("Forest", 2), ("Sol Ring", 1)] as '2 Forest, Sol Ring'."""
+    return ", ".join(f"{count} {name}" if count > 1 else name for name, count in cards)
+
+
+def _swap_spells_for_basics(
+    deck: list[MagicCard], identity: set[str], needed: int, lands: int, notes: list[str]
+) -> list[MagicCard]:
+    """Replace the last ``needed`` spells with basics; return any new basic entries.
+
+    Mana rocks and dorks are only cut as a last resort: LLMs tend to list ramp right
+    before the lands, and swapping Sol Ring for a Forest trades one mana source for a
+    worse one.
+    """
+    removed: list[tuple[str, int]] = []
+    spells = [card for card in reversed(list(deck)) if not _is_land(card)]
+    non_ramp = [card for card in spells if not card.produced_mana]
+    ramp = [card for card in spells if card.produced_mana]
+    for card in non_ramp + ramp:
+        while card.count > 0 and len(removed) < needed:
+            card.count -= 1
+            removed.append((card.name, 1))
+        if card.count <= 0:
+            deck.remove(card)
+        if len(removed) >= needed:
+            break
+    if not removed:
+        return []
+
+    # Any basic will do here - _balance_basic_lands assigns the colors afterwards.
+    existing = next((card for card in deck if card.name in _BASIC_NAMES), None)
+    added: list[MagicCard] = []
+    if existing is not None:
+        existing.count += len(removed)
+    else:
+        color = next((c for c in "WUBRG" if c in identity), None)
+        name = _BASIC_BY_COLOR[color] if color else "Wastes"
+        new_card = MagicCard(name=name, count=len(removed), category="Land")
+        deck.append(new_card)
+        added.append(new_card)
+    notes.append(
+        f"Deck had only {lands} lands; swapped its last {len(removed)} spell(s) "
+        f"({_describe(removed)}) for basic lands to reach {lands + len(removed)}."
+    )
+    return added
+
+
+def _remove_lands(deck: list[MagicCard], count: int) -> list[tuple[str, int]]:
+    """Remove ``count`` lands: basics from the largest pile first, then nonbasics from the end."""
+    removed: Counter = Counter()
+    for _ in range(count):
+        basics = [card for card in deck if card.name in _BASIC_NAMES and card.count > 0]
+        if basics:
+            pile = max(basics, key=lambda card: card.count)
+            pile.count -= 1
+            removed[pile.name] += 1
+            if pile.count <= 0:
+                deck.remove(pile)
+            continue
+        nonbasic = next((card for card in reversed(deck) if _is_land(card)), None)
+        if nonbasic is None:
+            break
+        deck.remove(nonbasic)
+        removed[nonbasic.name] += 1
+    return list(removed.items())
+
+
+def _spell_candidates(
+    recommendations: dict[str, list[dict[str, Any]]], excluded: set[str]
+) -> list[tuple[str, str]]:
+    """Nonland EDHREC picks not in ``excluded``, most-played first, as (name, header)."""
+    seen: set[str] = set()
+    ranked: list[tuple[int, str, str]] = []
+    for header, cards in (recommendations or {}).items():
+        if "land" in header.lower():
+            continue
+        for card in cards:
+            name = (card.get("name") or "").strip()
+            key = name.lower()
+            if not name or key in excluded or key in seen:
+                continue
+            seen.add(key)
+            ranked.append((int(card.get("num_decks") or 0), name, header))
+    ranked.sort(key=lambda item: item[0], reverse=True)
+    return [(name, header) for _, name, header in ranked]
 
 
 def _trim_to_size(deck: dict[str, MagicCard], target: int) -> None:
