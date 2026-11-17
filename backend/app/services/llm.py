@@ -46,9 +46,31 @@ Rules:
 - Basic lands ("Plains", "Island", "Swamp", "Mountain", "Forest", "Wastes") may
   repeat with count > 1; every other card must have count == 1 (singleton) UNLESS the card specifies otherwise, like "Hare Apparent"
   or other similar cards.
-- When building out the mana base, ensure that the mana production supports the mana cost. If mana costs
-  more heavily feature one color, prioritize that color in the mana base, but don't neglect the others. 
-  Include appropriate mana-fixing and colorless sources if needed.
+- List every nonland card FIRST, then the lands, so the mana base is chosen after the
+  spells are known.
+- The mana base must match the deck's color requirements. Before choosing lands, tally
+  the colored mana symbols in the mana costs of the nonland cards and the commander
+  (count the commander's symbols double - it is cast repeatedly; a hybrid symbol like
+  {W/U} counts half for each color). Each color's share of colored mana SOURCES should
+  roughly match its share of those symbols.
+- Count every colored source, not just basics: nonbasic lands count once for each color
+  they produce (fetch lands count for each basic type they can find), and mana rocks
+  and mana creatures (e.g. Arcane Signet, Talismans, Llanowar Elves, Birds of Paradise)
+  count about half a source per color - they cost a card and a turn and can be
+  removed. Sol Ring and other colorless rocks, and one-shot rituals, are not colored
+  sources.
+- Fixing REPLACES basics; it does not add to the land count. Keep the total land count
+  normal for the bracket and curve - usually 35-38 lands (fewer, ~33-34, only with
+  lots of cheap ramp). Count modal double-faced cards with a land side toward it.
+- Choose the nonbasic lands and mana rocks/dorks first, then use basics to fill
+  whatever colors are still short. Example: symbols that are 25% W, 10% U, 15% B,
+  40% R, 10% G. With no other fixing, 20 basics split about 5 Plains, 2 Island,
+  3 Swamp, 8 Mountain, 2 Forest. But if the duals and rocks already give green and
+  blue plenty of sources while red has few, shift the basics further toward red (and
+  white) so the TOTAL sources per color land near 25/10/15/40/10.
+- Colors whose cards are cheap or appear in early turns need more sources than their
+  raw share suggests; give every color the deck actually uses at least a few sources.
+  Do not add basics of a color the deck's cards don't use.
 - Cover ramp, card draw, removal/interaction, threats, and an appropriate land
   count for the bracket and curve.
 - Respect the bracket constraints described in the user message, including the

@@ -13,7 +13,7 @@ import re
 import time
 
 import logging
-from typing import Any, Optional
+from typing import Any, Iterable, Optional
 
 from ..config import get_settings
 from ..constants import GAMECHANGERS, gamechanger_limit
@@ -190,6 +190,9 @@ class DeckBuilder:
             prefetched_cards,
         )
         decklist = await self._hydrate_cards(decklist, prefetched_cards)
+        decklist = await self._balance_basics(
+            decklist, [c for c in (commander_card, secondary_commander_card) if c], notes
+        )
         substitutions = await self._hydrate_substitutions(substitutions, prefetched_cards)
         response = DeckResponse(
             version=1,
@@ -321,6 +324,12 @@ class DeckBuilder:
                 prefetched_cards,
             )
         decklist = await self._hydrate_cards(decklist, prefetched_cards)
+        if llm_result is not None:
+            # Only rebalance decks the LLM produced; a preserved (failed-revamp) deck is
+            # the user's own list and is returned untouched.
+            decklist = await self._balance_basics(
+                decklist, [c for c in (commander_card, secondary_commander_card) if c], notes
+            )
         substitutions = await self._hydrate_substitutions(substitutions, prefetched_cards)
         next_version = (
             request.previous_version + 1
@@ -343,6 +352,18 @@ class DeckBuilder:
         )
         self._cache_set(cache_key, response)
         return response
+
+    async def _balance_basics(
+        self,
+        decklist: list[MagicCard],
+        command_zone: list[dict[str, Any]],
+        notes: list[str],
+    ) -> list[MagicCard]:
+        """Match the basic-land split to the deck's color needs (requires hydrated costs)."""
+        added = _balance_basic_lands(decklist, command_zone, notes)
+        if added:
+            await self._hydrate_cards(added)
+        return decklist
 
     def _llm_failure_message(self, what: str) -> str:
         """Explain an LLM failure to the user, including the (client-safe) reason when known."""
@@ -616,13 +637,17 @@ def _decklist_signature(decklist: list[MagicCard]) -> list[tuple[str, int]]:
 def _with_scryfall_text(
     raw_list: list[Any], prefetched_cards: dict[str, dict[str, Any]]
 ) -> list[Any]:
-    """Copy oracle text / card faces from prefetched Scryfall data onto raw LLM entries."""
+    """Copy oracle text, type line and card faces from prefetched Scryfall data onto raw LLM entries."""
     enriched: list[Any] = []
     for entry in raw_list:
-        if isinstance(entry, dict) and not entry.get("oracle_text"):
+        if isinstance(entry, dict):
             data = prefetched_cards.get(str(entry.get("name") or "").strip().lower())
             if data:
-                entry = {**entry, "oracle_text": data.get("oracle_text") or ""}
+                entry = dict(entry)
+                if not entry.get("oracle_text"):
+                    entry["oracle_text"] = data.get("oracle_text") or ""
+                if not entry.get("type_line") and data.get("type_line"):
+                    entry["type_line"] = data["type_line"]
                 if data.get("card_faces") and "card_faces" not in entry:
                     entry["card_faces"] = data["card_faces"]
         enriched.append(entry)
@@ -685,7 +710,8 @@ def _normalize_decklist(
         if not is_basic and not allows_any_number:
             count = 1
             
-        seen[key] = MagicCard(name=name, count=count, category=category)
+        type_line = entry.get("type_line") if isinstance(entry.get("type_line"), str) else None
+        seen[key] = MagicCard(name=name, count=count, category=category, type_line=type_line)
 
     # Calculate current size state
     total = sum(card.count for card in seen.values())
@@ -700,77 +726,277 @@ def _normalize_decklist(
     return list(seen.values())
 
 
+def _is_land(card: MagicCard) -> bool:
+    """Best-effort land check before/after hydration (type line, then name/category)."""
+    if card.name in _BASIC_NAMES:
+        return True
+    if card.type_line:
+        return "Land" in card.type_line
+    return "land" in (card.category or "").lower()
+
+
 def _trim_to_size(deck: dict[str, MagicCard], target: int) -> None:
-    """Trim a normalized deck down to the target size, preferring basic lands first."""
-    while sum(c.count for c in deck.values()) > target:
-        basic_keys = [k for k, v in deck.items() if v.name in _BASIC_NAMES and v.count > 1]
-        if basic_keys:
-            deck[basic_keys[-1]].count -= 1
-            continue
-        # Pop the last inserted non-basic.
-        for key in reversed(list(deck.keys())):
-            if deck[key].name not in _BASIC_NAMES:
+    """Trim an oversized deck to ``target`` while keeping its land-to-spell ratio.
+
+    LLMs often overshoot 99 cards. Cutting only basics (the old behavior) silently
+    gutted the mana base, so cuts are split between lands and spells in proportion to
+    how many of each the list has. Lands lose basics from the largest pile first;
+    spells and nonbasic lands are cut from the end of the list (lowest priority).
+    """
+    total = sum(c.count for c in deck.values())
+    excess = total - target
+    if excess <= 0:
+        return
+    land_total = sum(c.count for c in deck.values() if _is_land(c))
+    land_cuts = round(excess * land_total / total) if total else 0
+    spell_cuts = excess - land_cuts
+
+    def cut_land() -> bool:
+        piles = [c for c in deck.values() if c.name in _BASIC_NAMES and c.count > 1]
+        if piles:
+            max(piles, key=lambda c: c.count).count -= 1
+            return True
+        for key in reversed(list(deck)):
+            if _is_land(deck[key]) and deck[key].name not in _BASIC_NAMES:
                 del deck[key]
-                break
-        else:
+                return True
+        return False
+
+    def cut_spell() -> bool:
+        for key in reversed(list(deck)):
+            if not _is_land(deck[key]):
+                del deck[key]
+                return True
+        return False
+
+    for _ in range(land_cuts):
+        if not cut_land():
+            spell_cuts += 1
+    for _ in range(spell_cuts):
+        if not cut_spell() and not cut_land():
             break
+    # Last resort (e.g. a list of nothing but single basics): drop from the end.
+    while sum(c.count for c in deck.values()) > target and deck:
+        last = next(reversed(list(deck)))
+        if deck[last].count > 1:
+            deck[last].count -= 1
+        else:
+            del deck[last]
+
+
+_MANA_SYMBOL_RE = re.compile(r"\{([^}]+)\}")
+
+
+def _color_pips(mana_cost: Optional[str]) -> Counter:
+    """Count colored mana symbols in a cost; hybrid symbols split their weight.
+
+    "{2}{W}{W}" -> W:2, "{W/U}" -> W:0.5 U:0.5, "{2/R}" and "{G/P}" -> 1 each.
+    """
+    pips: Counter = Counter()
+    for symbol in _MANA_SYMBOL_RE.findall(mana_cost or ""):
+        colors = [part for part in symbol.upper().split("/") if part in _BASIC_BY_COLOR]
+        for color in colors:
+            pips[color] += 1 / len(colors)
+    return pips
+
+
+def _deck_color_pips(
+    cards: Iterable[Any], command_zone: Iterable[dict[str, Any]], identity: Iterable[str]
+) -> dict[str, float]:
+    """Total colored pips across nonland cards plus the commander(s), within the identity."""
+    pips: Counter = Counter()
+    for card in cards:
+        type_line = getattr(card, "type_line", None) or ""
+        if "Land" in type_line or (not type_line and getattr(card, "category", None) == "Land"):
+            continue
+        for color, value in _color_pips(getattr(card, "mana_cost", None)).items():
+            pips[color] += value * max(1, int(getattr(card, "count", 1) or 1))
+    for commander in command_zone:
+        # The commander is cast repeatedly from the command zone, so its colors matter
+        # more than any single card in the 99.
+        for color, value in _color_pips(commander.get("mana_cost")).items():
+            pips[color] += value * 2
+    allowed = {c for c in identity if c in _BASIC_BY_COLOR}
+    return {color: pips[color] for color in "WUBRG" if color in allowed and pips[color] > 0}
+
+
+def _allocate_proportionally(weights: dict[str, float], total: int) -> dict[str, int]:
+    """Split ``total`` across keys in proportion to ``weights`` (largest-remainder rounding).
+
+    Every key with a positive weight gets at least one when ``total`` allows, so a
+    lightly-used color still has a basic to fetch.
+    """
+    weight_sum = sum(weights.values())
+    if total <= 0 or weight_sum <= 0:
+        return {key: 0 for key in weights}
+    exact = {key: weight / weight_sum * total for key, weight in weights.items()}
+    counts = {key: int(value) for key, value in exact.items()}
+    by_remainder = sorted(
+        weights, key=lambda key: (exact[key] - counts[key], weights[key]), reverse=True
+    )
+    for key in by_remainder[: total - sum(counts.values())]:
+        counts[key] += 1
+    if total >= len(weights):
+        for key in [k for k, v in counts.items() if v == 0]:
+            donor = max(counts, key=lambda k: (counts[k], weights[k]))
+            counts[donor] -= 1
+            counts[key] += 1
+    return counts
+
+
+# Nonland mana permanents (rocks, dorks) count for less than a land: they cost a card
+# and a turn, and creatures in particular are easy to lose.
+_NONLAND_SOURCE_WEIGHT = 0.5
+_PERMANENT_TYPES = ("Artifact", "Creature", "Enchantment", "Planeswalker", "Battle")
+_FETCH_TARGET_RE = re.compile(r"search your library for (?:an?|up to \w+) (.+?) cards?\b")
+
+
+def _fetchable_colors(oracle_text: Optional[str], identity: set[str]) -> set[str]:
+    """Colors a fetch land can find: named basic types, or any color for 'basic land'."""
+    text = (oracle_text or "").lower()
+    match = _FETCH_TARGET_RE.search(text)
+    if not match:
+        return set()
+    target = match.group(1)
+    colors = {color for color, basic in _BASIC_BY_COLOR.items() if basic.lower() in target}
+    if not colors and "basic land" in target:
+        colors = set(identity)
+    return colors & identity
+
+
+def _colored_sources(deck: Iterable[MagicCard], identity: set[str]) -> dict[str, float]:
+    """Colored mana sources already in the deck, excluding the colored basics.
+
+    Lands count 1 per color they can produce (fetch lands count for each basic type
+    they can find); mana rocks and dorks count ``_NONLAND_SOURCE_WEIGHT``. "Any color"
+    sources such as Command Tower or Arcane Signet count for every identity color.
+    One-shot spells (Dark Ritual, Cultivate) and colorless sources are ignored.
+    """
+    sources: Counter = Counter()
+    for card in deck:
+        if card.name in _BASIC_NAMES:
+            continue
+        type_line = card.type_line or ""
+        is_land = "Land" in type_line
+        if not is_land and not any(t in type_line for t in _PERMANENT_TYPES):
+            continue
+        colors = {c for c in (card.produced_mana or []) if c in identity}
+        if not colors and is_land:
+            colors = _fetchable_colors(card.oracle_text, identity)
+        weight = (1.0 if is_land else _NONLAND_SOURCE_WEIGHT) * max(1, card.count or 1)
+        for color in colors:
+            sources[color] += weight
+    return dict(sources)
+
+
+def _allocate_basics(demand: dict[str, float], existing: dict[str, float], total: int) -> dict[str, int]:
+    """Give basics to whichever colors are most under-supplied relative to demand.
+
+    Each color's supply is its existing colored sources plus the basics given so far;
+    every basic goes to the color with the highest demand share per source (a
+    D'Hondt-style allocation that starts from the existing sources). With no other
+    sources this is a plain proportional split. Every demanded color gets at least
+    one basic when ``total`` allows, so fetch effects always have a target.
+    """
+    counts = {color: 0 for color in demand}
+    demand_sum = sum(demand.values())
+    if total <= 0 or demand_sum <= 0:
+        return counts
+    if total >= len(demand):
+        counts = {color: 1 for color in demand}
+    for _ in range(total - sum(counts.values())):
+        neediest = max(
+            demand,
+            key=lambda c: (demand[c] / demand_sum / (existing.get(c, 0) + counts[c] + 1), demand[c]),
+        )
+        counts[neediest] += 1
+    return counts
+
+
+def _balance_basic_lands(
+    deck: list[MagicCard],
+    command_zone: list[dict[str, Any]],
+    notes: list[str],
+) -> list[MagicCard]:
+    """Redistribute the deck's colored basics so total colored sources match color needs.
+
+    Demand is each color's share of mana symbols; supply already includes nonbasic
+    lands, mana rocks and mana creatures, so basics fill in the colors those leave
+    short. The total number of basics is unchanged; only the Plains/Island/Swamp/
+    Mountain/Forest split moves. Wastes and nonbasic cards are never touched. Returns
+    any newly-added basic entries so the caller can hydrate them.
+    """
+    identity: set[str] = set()
+    for commander in command_zone:
+        identity.update(commander.get("color_identity") or [])
+    color_by_basic = {name: color for color, name in _BASIC_BY_COLOR.items()}
+    basics = {card.name: card for card in deck if card.name in color_by_basic}
+    total_basics = sum(card.count for card in basics.values())
+    pips = _deck_color_pips(deck, command_zone, identity)
+    if total_basics == 0 or not pips:
+        return []
+
+    existing = _colored_sources(deck, identity)
+    targets = {
+        _BASIC_BY_COLOR[color]: n
+        for color, n in _allocate_basics(pips, existing, total_basics).items()
+    }
+    before = {name: card.count for name, card in basics.items() if card.count}
+    if before == {name: n for name, n in targets.items() if n}:
+        return []
+
+    for name, card in basics.items():
+        card.count = targets.get(name, 0)
+    deck[:] = [card for card in deck if not (card.name in color_by_basic and card.count <= 0)]
+    added: list[MagicCard] = []
+    for name, count in targets.items():
+        if count > 0 and name not in basics:
+            new_card = MagicCard(name=name, count=count, category="Land")
+            deck.append(new_card)
+            added.append(new_card)
+
+    pip_total = sum(pips.values())
+    shares = ", ".join(f"{color} {round(value / pip_total * 100)}%" for color, value in pips.items())
+    split = ", ".join(f"{count} {name}" for name, count in targets.items() if count)
+    totals = {
+        color: existing.get(color, 0) + targets.get(_BASIC_BY_COLOR[color], 0) for color in pips
+    }
+    supply = ", ".join(f"{color} {_fmt_sources(value)}" for color, value in totals.items())
+    other = " after counting nonbasic lands, mana rocks and dorks" if existing else ""
+    notes.append(
+        f"Balanced {total_basics} basic lands to the deck's color needs ({shares}){other}: "
+        f"{split}. Colored sources now: {supply}."
+    )
+    return added
+
+
+def _fmt_sources(value: float) -> str:
+    return str(int(value)) if float(value).is_integer() else f"{value:.1f}"
 
 
 def _pad_with_basics(deck: dict[str, MagicCard], commander_card: dict[str, Any], needed: int) -> None:
-    """Pad an undersized deck with basics weighted by the deck's mana pips."""
-    
-    # 1. Tally all colored pips in the current deck
-    pip_counts = Counter()
-    for card in deck.values():
-        # Skip lands when counting pips to avoid feedback loops
-        if card.category == "Land":
-            continue
-            
-        # Assuming your MagicCard or entry has 'mana_cost' (e.g., "{2}{G}{W}")
-        # or 'color_identity' from the Scryfall data
-        # Scryfall 'mana_cost' is the most accurate for 'on-curve' needs
-        cost = getattr(card, 'mana_cost', "") or ""
-        for color in "WUBRG":
-            pip_counts[color] += cost.count(color)
+    """Pad an undersized deck with basics, weighted by mana pips when costs are known.
 
-    # 2. Filter pips by Commander's color identity (legal basics only)
-    allowed_colors = commander_card.get("color_identity") or []
-    # If colorless or no pips found, default to Wastes or even distribution
-    relevant_pips = {c: pip_counts[c] for c in allowed_colors if c in _BASIC_BY_COLOR}
-    total_pips = sum(relevant_pips.values())
-
-    # 3. Handle edge case: No pips found or Colorless identity
-    if total_pips == 0:
-        basics = [_BASIC_BY_COLOR[c] for c in allowed_colors if c in _BASIC_BY_COLOR] or ["Wastes"]
+    During normalization cards usually don't have Scryfall data yet, so this often
+    falls back to an even split; ``_balance_basic_lands`` corrects the split after
+    hydration.
+    """
+    identity = commander_card.get("color_identity") or []
+    pips = _deck_color_pips(deck.values(), [], identity)
+    if not pips:
+        basics = [_BASIC_BY_COLOR[c] for c in identity if c in _BASIC_BY_COLOR] or ["Wastes"]
         _distribute_round_robin(deck, basics, needed)
         return
-
-    # 4. Calculate weighted counts
-    # We use a greedy approach to ensure we don't lose lands to rounding
-    weighted_targets = {}
-    for color, count in relevant_pips.items():
-        share = count / total_pips
-        weighted_targets[_BASIC_BY_COLOR[color]] = int(share * needed)
-
-    # Fill the remaining lands (due to rounding down) based on highest pip priority
-    current_filled = sum(weighted_targets.values())
-    remainder = needed - current_filled
-    
-    # Sort colors by highest pip count to receive the 'remainder' lands
-    sorted_basics = sorted(relevant_pips.keys(), key=lambda c: relevant_pips[c], reverse=True)
-    for i in range(remainder):
-        color = sorted_basics[i % len(sorted_basics)]
-        weighted_targets[_BASIC_BY_COLOR[color]] += 1
-
-    # 5. Apply to the deck
-    for basic_name, count_to_add in weighted_targets.items():
+    for color, count_to_add in _allocate_proportionally(pips, needed).items():
         if count_to_add <= 0:
             continue
+        basic_name = _BASIC_BY_COLOR[color]
         key = basic_name.lower()
         if key in deck:
             deck[key].count += count_to_add
         else:
             deck[key] = MagicCard(name=basic_name, count=count_to_add, category="Land")
+
 
 def _distribute_round_robin(deck, basics, needed):
     """Fallback helper for even distribution."""

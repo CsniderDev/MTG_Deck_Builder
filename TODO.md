@@ -1,8 +1,13 @@
 # TODO
 
 - Save current searches to local storage to ensure data is persisted in the tab
-- Ensure mana production mirrors mana costs. right now it seems to be just leveraging an even spread mana base where it needs to better 
-  match what the costs are.
+- ~~Ensure mana production mirrors mana costs~~ done: basics are now split by each color's share of
+  mana symbols (after Scryfall hydration, for LLM and heuristic builds), the LLM prompt asks for
+  pip-proportional sources, and over-99 trimming no longer cuts only basics.
+  Basics now also account for colored sources from nonbasic lands (incl. fetches), mana rocks and dorks.
+- LLM land counts are inconsistent (28-49 seen across runs with Gemini thinking off). Consider a
+  deterministic land-count guard: swap end-of-list spells for basics when under ~34 lands, and swap
+  excess basics for EDHREC picks when over ~40.
 - If a revamp is done, persist the previous decklist and dont default to the heuristic build
 - ~~Add security measures in place to ensure malicious users dont overload APIs or spam requests to the LLM~~ done:
   per-IP rate limiting (5/min, 50/day) on build/revamp, a shared daily Gemini call budget with
