@@ -106,8 +106,18 @@ def test_normalize_drops_commander_from_list():
 
 
 class _StubScryfall:
+    """Scryfall stub. ``search`` serves a catalog of generic legal cards ("Card 0".."Card 79")."""
+
     def __init__(self):
         self.collection_calls = 0
+        self.collection_requests: list[list[str]] = []
+        self.searches: list[str] = []
+
+    async def search(self, query, order="edhrec", direction="auto", limit=175):
+        self.searches.append(query)
+        if "new:card" in query:
+            return []
+        return (await self.get_collection([f"Card {i}" for i in range(80)], count=False))[:limit]
 
     async def resolve_commander(self, name):
         if "tymna" in name.lower():
@@ -156,8 +166,10 @@ class _StubScryfall:
             "options": [],
         }
 
-    async def get_collection(self, names):
-        self.collection_calls += 1
+    async def get_collection(self, names, count=True):
+        if count:
+            self.collection_calls += 1
+            self.collection_requests.append(list(names))
         return [
             {
                 "id": f"id-{name.lower().replace(' ', '-')}",
@@ -197,12 +209,28 @@ class _StubEDHRec:
 
 
 class _StubLLM:
+    """LLM stub: plan/select answer from ``payload`` (picks are the payload's card names)."""
+
+    provider_label = "Stub"
+    last_failure_reason = None
+
     def __init__(self, payload=None, enabled=True):
         self._payload = payload
         self.enabled = enabled
 
-    async def build_deck(self, **kwargs):
-        return self._payload
+    async def plan_deck(self, **kwargs):
+        if self._payload is None:
+            return None
+        return {"strategy": "Stub plan.", "targets": {}, "theme_queries": ["o:test"]}
+
+    async def select_cards(self, **kwargs):
+        if self._payload is None:
+            return None
+        return {
+            "picks": [entry["name"] for entry in self._payload.get("decklist", [])],
+            "explanation": self._payload.get("explanation"),
+            "notes": self._payload.get("notes", []),
+        }
 
     async def revamp_deck(self, **kwargs):
         return self._payload
@@ -242,19 +270,20 @@ async def test_build_without_llm_uses_heuristic():
 
 
 @pytest.mark.asyncio
-async def test_build_with_full_llm_payload_reuses_validation_collection_for_hydration():
+async def test_build_hydrates_from_pool_data_without_refetching_picked_cards():
     payload = {
-        # 63 spells + 36 basics already split to Atraxa's even WUBG needs, so neither the
-        # land-count guard nor the color balance adds cards that need another lookup.
-        "decklist": [{"name": f"Card {i}", "count": 1, "category": "Misc"} for i in range(63)]
-        + [{"name": basic, "count": 9, "category": "Land"} for basic in ("Plains", "Island", "Swamp", "Forest")],
+        "decklist": [{"name": f"Card {i}", "count": 1, "category": "Misc"} for i in range(63)],
         "explanation": "Fast plan.",
     }
     scryfall = _StubScryfall()
     builder = DeckBuilder(scryfall, _StubEDHRec(), _StubLLM(payload))
     result = await builder.build(BuildDeckRequest(commander="Atraxa", bracket=3, prompt="combo"))
     assert result.source == "llm"
-    assert scryfall.collection_calls == 1
+    assert sum(c.count for c in result.decklist) == DECK_SIZE
+    # The first lookup is the EDHREC names for the pool; after that only basics (which
+    # are not pool cards) may be fetched - never the picked cards again.
+    later_requests = {name for request in scryfall.collection_requests[1:] for name in request}
+    assert later_requests <= {"Plains", "Island", "Swamp", "Forest", "Mountain", "Wastes"}
 
 
 @pytest.mark.asyncio
@@ -380,7 +409,11 @@ async def test_build_without_prompt_skips_llm_even_when_enabled():
             super().__init__(payload=None, enabled=True)
             self.calls = 0
 
-        async def build_deck(self, **kwargs):
+        async def plan_deck(self, **kwargs):
+            self.calls += 1
+            return None
+
+        async def select_cards(self, **kwargs):
             self.calls += 1
             return None
 
@@ -464,3 +497,32 @@ def test_heuristic_decklist_caps_bracket_3_at_three_gamechangers():
         "Rhystic Study", "Smothering Tithe", "Mana Drain", "The One Ring", "Necropotence"
     }]
     assert len(gc_picked) == 3
+
+
+@pytest.mark.asyncio
+async def test_revamp_drops_off_color_cards_instead_of_keeping_them():
+    class _OffColorScryfall(_StubScryfall):
+        async def get_collection(self, names, count=True):
+            cards = await super().get_collection(names, count)
+            for card in cards:
+                if card["name"] == "Lightning Bolt":
+                    card["color_identity"] = ["R"]
+            return cards
+
+    payload = {
+        "decklist": [{"name": "Sol Ring", "count": 1}, {"name": "Lightning Bolt", "count": 1}],
+        "explanation": "Revised.",
+        "substitutions": [],
+    }
+    builder = DeckBuilder(_OffColorScryfall(), _StubEDHRec(), _StubLLM(payload))
+    request = RevampDeckRequest(
+        commander="Atraxa",
+        bracket=3,
+        previous_decklist=[MagicCard(name="Old Card", count=1)],
+        change_request="add burn",
+    )
+    result = await builder.revamp(request)
+    names = {c.name for c in result.decklist}
+    assert "Sol Ring" in names
+    assert "Lightning Bolt" not in names
+    assert any("Lightning Bolt (Color Mismatch)" in note for note in result.notes)

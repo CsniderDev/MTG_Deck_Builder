@@ -149,6 +149,29 @@ card art and a "Revert this swap" button. Reverting is purely client-side: `App.
 `previousLibraryForCurrentDeck`, decrementing/removing added ones) without another network call — it does not
 ask the LLM to redo anything, so it can drift from what the server would produce if asked to revamp again.
 
+### Deck building pipeline (build only)
+
+`DeckBuilder.build` no longer lets the LLM write card names from memory:
+
+1. **Plan** (`LLMService.plan_deck`, skipped without a concept): strategy, role targets
+   (lands/ramp/draw/removal/wipe) and 2-4 Scryfall theme queries. Runs concurrently with the
+   EDHREC fetch and `prefetch_base_searches`.
+2. **Pool** (`services/card_pool.py: build_card_pool`): numbered candidates from the EDHREC
+   commander page, Scryfall role searches (`otag:ramp` etc., by EDHREC rank), the plan's theme
+   queries (popular + `new:card` newest-first), and the newest cards in the identity. Every card is
+   checked for Commander legality, identity, the banned list and game-changer status; tags `new`
+   (first printed in the last ~18 months) and `gem` (theme card not on the EDHREC page, rarely played).
+   Theme queries are sanitized (`sanitize_theme_queries`) so they can't widen identity/format.
+3. **Select** (`LLMService.select_cards`): the model returns pool numbers grouped by role.
+4. **Assemble** (`assemble_deck`): exact deck size, role targets protected when the model
+   over-picks, gaps filled from the best-ranked pool cards, game-changer limit enforced, basics
+   added; then `_enforce_land_count` and `_balance_basic_lands` run as before.
+
+Without a concept the same pool is assembled with default targets (`source="heuristic"`).
+Revamp still uses the name-based single-call flow, but now drops cards that fail validation.
+Scryfall requests are spaced 500ms apart for search/named/collection endpoints (100ms for others)
+with 429 retry/backoff - bursts above that earned 16-60s penalties.
+
 ### LLM providers
 
 `LLMService` (`backend/app/services/llm.py`) owns the prompts, retries, JSON extraction, daily call budget and

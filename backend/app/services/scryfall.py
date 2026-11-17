@@ -8,6 +8,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import re
+import time
 from typing import Any, Optional
 
 import httpx
@@ -15,7 +16,12 @@ import httpx
 from ..config import get_settings
 
 
-_REQUEST_DELAY = 0.075  # Scryfall asks for 50-100ms between calls.
+_REQUEST_DELAY = 0.1  # Scryfall asks for 50-100ms between calls (~10/s max).
+# Card search/lookup endpoints get a stricter spacing: bursts of ~13/s to these returned
+# 429s with 16-60s Retry-After penalties, which cost far more than spacing them out.
+_HEAVY_ENDPOINT_DELAY = 0.5
+_HEAVY_ENDPOINTS = ("/cards/search", "/cards/named", "/cards/collection", "/cards/random")
+_MAX_429_RETRIES = 3
 _PARTNER_WITH_RE = re.compile(r"partner with\s+([^\n(]+)", re.IGNORECASE)
 _PARTNER_VARIANT_RE = re.compile(r"partner[—-]\s*([^\n(]+)", re.IGNORECASE)
 _TRAILING_SET_CODE_RE = re.compile(
@@ -75,17 +81,51 @@ class ScryfallClient:
         self._collection_cache: dict[str, dict[str, Any]] = {}
         self._banned_list_cache: Optional[list[str]] = None
         self._gamechangers_cache: Optional[list[str]] = None
+        self._search_cache: dict[tuple[str, str, str], list[dict[str, Any]]] = {}
+        self._last_request_at: dict[str, float] = {}
 
     async def aclose(self) -> None:
         """Close the shared HTTP client when this instance owns it."""
         if self._own_client:
             await self._client.aclose()
 
+    async def _throttle(self, path: str = "") -> None:
+        """Space request *starts*: 500ms apart for card search/lookup endpoints, 100ms otherwise.
+
+        Only the spacing is serialized; responses can overlap. (Holding the lock for the
+        whole request made slow searches - some take several seconds - run one by one.)
+        """
+        heavy = path.startswith(_HEAVY_ENDPOINTS)
+        bucket, delay = ("heavy", _HEAVY_ENDPOINT_DELAY) if heavy else ("light", _REQUEST_DELAY)
+        async with self._lock:
+            now = time.monotonic()
+            wait = max(
+                self._last_request_at.get(bucket, 0.0) + delay,
+                self._last_request_at.get("any", 0.0) + _REQUEST_DELAY,
+            ) - now
+            if wait > 0:
+                await asyncio.sleep(wait)
+            self._last_request_at[bucket] = self._last_request_at["any"] = time.monotonic()
+
+    async def _send(self, method: str, path: str, **kwargs: Any) -> httpx.Response:
+        """Send a throttled request, backing off and retrying on HTTP 429."""
+        for attempt in range(_MAX_429_RETRIES + 1):
+            await self._throttle(path)
+            response = await self._client.request(method, f"{self._base}{path}", **kwargs)
+            if response.status_code != 429 or attempt == _MAX_429_RETRIES:
+                return response
+            try:
+                wait = float(response.headers.get("retry-after", ""))
+            except ValueError:
+                wait = 1.0 * (attempt + 1)
+            self._logger.warning("Scryfall rate limit hit on %s; retrying in %.1fs", path, wait)
+            async with self._lock:  # pause everyone, not just this request
+                await asyncio.sleep(wait)
+        return response
+
     async def _get(self, path: str, params: Optional[dict[str, Any]] = None) -> dict[str, Any]:
         """Perform a rate-limited GET request against the Scryfall API."""
-        async with self._lock:
-            await asyncio.sleep(_REQUEST_DELAY)
-            response = await self._client.get(f"{self._base}{path}", params=params)
+        response = await self._send("GET", path, params=params)
         if response.status_code == 404:
             raise ScryfallError(f"Not found: {path} {params}")
         if response.status_code >= 400:
@@ -334,15 +374,19 @@ class ScryfallClient:
         missing_names = [name for name in unique_names if name.lower() not in self._collection_cache]
         chunk_size = 75
 
-        for i in range(0, len(missing_names), chunk_size):
-            chunk = missing_names[i:i + chunk_size]
+        async def fetch_chunk(chunk: list[str]) -> dict[str, Any]:
             payload = {"identifiers": [{"name": n} for n in chunk]}
-            
             try:
-                response_data = await self._post("/cards/collection", payload)
+                return await self._post("/cards/collection", payload)
             except ScryfallError:
                 # If the batch completely fails, queue them all up for individual recovery
-                response_data = {"data": [], "not_found": [{"name": n} for n in chunk]}
+                return {"data": [], "not_found": [{"name": n} for n in chunk]}
+
+        # Batches run concurrently (request starts are still spaced by _throttle).
+        chunks = [missing_names[i:i + chunk_size] for i in range(0, len(missing_names), chunk_size)]
+        responses = await asyncio.gather(*(fetch_chunk(chunk) for chunk in chunks))
+
+        for response_data in responses:
 
             # 1. Cache the successfully found cards
             for card in response_data.get("data", []):
@@ -388,6 +432,32 @@ class ScryfallClient:
         return results
     
 
+    async def search(
+        self, query: str, order: str = "edhrec", direction: str = "auto", limit: int = 175
+    ) -> list[dict[str, Any]]:
+        """Run a Scryfall search (first page, unique cards), cached per query.
+
+        Returns [] when nothing matches (Scryfall answers 404) and raises ScryfallError
+        for other failures such as a malformed query.
+        """
+        key = (query, order, direction)
+        if key not in self._search_cache:
+            try:
+                data = await self._get(
+                    "/cards/search",
+                    {"q": query, "order": order, "dir": direction, "unique": "cards"},
+                )
+                cards = list(data.get("data") or [])
+            except ScryfallError as exc:
+                if str(exc).startswith("Not found"):
+                    cards = []
+                else:
+                    raise
+            if len(self._search_cache) > 500:
+                self._search_cache.clear()
+            self._search_cache[key] = cards
+        return self._search_cache[key][:limit]
+
     async def _search_cards(self, query: str) -> list[dict[str, Any]]:
         """Run a Scryfall search query and return the first page of unique cards."""
         data = await self._get(
@@ -422,13 +492,9 @@ class ScryfallClient:
     async def _post(self, path: str, json_data: dict) -> dict:
         """Perform a rate-limited POST request against the Scryfall API."""
         try:
-            async with self._lock:
-                await asyncio.sleep(_REQUEST_DELAY)
-                response = await self._client.post(
-                    f"{self._base}{path}",
-                    json=json_data,
-                    timeout=httpx.Timeout(60.0, connect=10.0),
-                )
+            response = await self._send(
+                "POST", path, json=json_data, timeout=httpx.Timeout(60.0, connect=10.0)
+            )
         except httpx.ReadTimeout as exc:
             raise ScryfallError("Scryfall timed out while processing the card collection.") from exc
 

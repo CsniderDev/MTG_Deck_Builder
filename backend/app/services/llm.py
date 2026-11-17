@@ -80,9 +80,8 @@ Rules:
 - When building from scratch, return an empty ``substitutions`` array.
 - When revising an existing deck, include a ``substitutions`` entry for each
   meaningful card-for-card or package-for-package change, with concise reasons.
-- Understand that if the user has a card already in their deck, then that card
-  is a valid card and 
--  If there is card data provided in the attached JSON payload, it is verified, real, and exists on Scryfall. 
+- Cards already in the user's deck are valid cards.
+- If there is card data provided in the attached JSON payload, it is verified, real, and exists on Scryfall. 
 - Do NOT flag any card as a "hallucination," "placeholder," or "invalid card" based on your internal knowledge base. This application handles Universes Beyond (UB), flavor-name variants, and brand-new card sets that may be past your training data cutoff.
 - If a card is present in the provided list, treat it as an absolutely legal, valid Magic: The Gathering card for the purposes of this deck evaluation. Trust the provided data blindly.
 - Universes Beyond cards and cards with alternate printed names are valid if they 
@@ -93,9 +92,8 @@ Rules:
   or themes, label them with short tags like "ramp", "interaction", "card draw", 
   "win condition", "Board Wipe", "Theme Support" (but replace the word theme with the actual theme of the deck),
   etc. Otherwise, just use "Utility" for everything that doesn't fit into a small number of obvious categories.
-- You must actively consider the brand-new sets and Universes Beyond card options provided in the [New Card Pool] context below. 
-- Evaluate these cards strictly by their mechanics, type lines, and oracle text provided in the payload. Do not ignore them just because they are unfamiliar to your historical training data.
-- Integrate these new tools seamlessly into the deck strategy if they synergize with the Commander's theme.
+- Cards from sets newer than your training data are real; judge any card you don't
+  recognize by the rules text provided, not by whether you have heard of it.
 """.strip()
 
 
@@ -168,6 +166,27 @@ def _classify_llm_error(exc: Exception) -> str:
         suffix = f" {enum}" if isinstance(enum, str) and enum.isupper() else ""
         return f"the provider rejected the request ({status}{suffix}) - see server logs"
     return f"unexpected error calling the model ({type(exc).__name__})"
+
+
+def _budget_block(user_prompt: Optional[str]) -> str:
+    """Spell out a budget the user mentioned, so both build steps respect it."""
+    if not user_prompt:
+        return ""
+    explicit = re.search(
+        r"(?:budget|max|limit|under|cost|price)\s*\$?\s*(\d+(?:\.\d{2})?)|\$(\d+(?:\.\d{2})?)\s*(?:dollars|bucks|usd)",
+        user_prompt,
+        re.IGNORECASE,
+    )
+    if explicit:
+        amount = explicit.group(1) or explicit.group(2)
+        return f"The total deck budget must be at or under ${amount} (card prices are shown in USD).\n"
+    loose = re.search(r"\$(\d+(?:\.\d{2})?)", user_prompt)
+    if loose:
+        return (
+            f"The user mentioned ${loose.group(1)}; if that is a budget, keep the deck at or under it "
+            "(card prices are shown in USD).\n"
+        )
+    return ""
 
 
 class LLMService:
@@ -295,29 +314,119 @@ class LLMService:
         """Reset the circuit breaker's failure count after a successful LLM call."""
         self._consecutive_failures = 0
 
-    async def build_deck(
+    async def plan_deck(
         self,
         commander: dict[str, Any],
         bracket: int,
         bracket_description: str,
         user_prompt: str,
-        recommendations: dict[str, list[dict[str, Any]]],
         gamechanger_limit: Optional[int] = None,
-        gamechangers: Optional[Iterable[str]] = None,
-        banned_list: Optional[Iterable[str]] = None,
     ) -> Optional[dict[str, Any]]:
-        """Ask the LLM to build a new commander deck from a commander and concept prompt."""
+        """Step 1 of a build: strategy, role counts, and Scryfall theme searches."""
         if self._provider is None:
             return None
-        prompt = self._build_prompt(
-            commander,
-            bracket,
-            bracket_description,
-            user_prompt,
-            recommendations,
-            gamechanger_limit,
-            gamechangers,
-            banned_list,
+        ci = "".join(commander.get("color_identity") or []) or "C"
+        gc_rule = (
+            "unlimited" if gamechanger_limit is None else f"at most {gamechanger_limit}"
+        )
+        prompt = (
+            "You are an expert Magic: The Gathering Commander deck builder planning a deck.\n\n"
+            f"Commander: {commander.get('name')}\n"
+            f"Type line: {commander.get('type_line')}\n"
+            f"Color identity: {ci}\n"
+            f"Oracle text: {commander.get('oracle_text') or '(none)'}\n\n"
+            f"Bracket {bracket}: {bracket_description} Game-changers allowed: {gc_rule}.\n"
+            f"{_budget_block(user_prompt)}"
+            f"User's deck concept (PRIMARY DIRECTION): {user_prompt or '(none - use the commanders strengths)'}\n\n"
+            "Plan the deck. Respond ONLY with a JSON object:\n"
+            "{\n"
+            '  "strategy": "<2-3 sentences: game plan and how it wins>",\n'
+            '  "targets": {"lands": <33-40>, "ramp": <int>, "draw": <int>, "removal": <int>, "wipe": <int>},\n'
+            '  "theme_queries": ["<Scryfall search query>", "..."]\n'
+            "}\n"
+            "Rules:\n"
+            "- targets are card counts for a 99-card deck; cards for the theme fill the rest. "
+            "Typical: 35-38 lands, 8-12 ramp, 8-12 draw, 6-10 removal/interaction, 1-4 board wipes. "
+            "Adjust for the bracket, curve and concept.\n"
+            "- theme_queries: 2-4 Scryfall search queries that find cards for THIS deck's theme "
+            "and the commander's mechanics, using Scryfall syntax such as o:\"text\" (rules text), "
+            "t:type, kw:keyword, otag:tag, cmc<=3, pow>=4. Examples: o:proliferate, "
+            "o:\"+1/+1 counter\" t:creature, t:goblin, kw:flying t:creature cmc<=3, "
+            "otag:sacrifice-outlet. Do NOT add color, format, legality or ordering filters - "
+            "the server adds those. Keep each query short and specific.\n"
+        )
+        return await self._generate_json(prompt)
+
+    async def select_cards(
+        self,
+        commander: dict[str, Any],
+        bracket: int,
+        bracket_description: str,
+        user_prompt: str,
+        plan: dict[str, Any],
+        targets: dict[str, int],
+        pool_text: str,
+        deck_size: int,
+        gamechanger_limit: Optional[int] = None,
+    ) -> Optional[dict[str, Any]]:
+        """Step 2 of a build: choose cards from the numbered candidate pool."""
+        if self._provider is None:
+            return None
+        ci = "".join(commander.get("color_identity") or []) or "C"
+        nonland = deck_size - targets["lands"]
+        gc_rule = (
+            "Game-changers (tagged [game changer]) are unrestricted."
+            if gamechanger_limit is None
+            else f"Pick at most {gamechanger_limit} card(s) tagged [game changer]."
+        )
+        prompt = (
+            "You are an expert Magic: The Gathering Commander deck builder. Choose the cards "
+            "for this deck from the numbered candidate pool below.\n\n"
+            f"Commander: {commander.get('name')} (color identity {ci})\n"
+            f"Oracle text: {commander.get('oracle_text') or '(none)'}\n"
+            f"Bracket {bracket}: {bracket_description}\n"
+            f"{_budget_block(user_prompt)}"
+            f"User's deck concept (PRIMARY DIRECTION): {user_prompt or '(none)'}\n"
+            f"Plan: {plan.get('strategy') or '(none)'}\n"
+            f"Targets: {nonland} nonland cards - including about {targets['ramp']} ramp, "
+            f"{targets['draw']} card draw, {targets['removal']} removal/interaction, "
+            f"{targets['wipe']} board wipes, and the rest for the theme - plus "
+            f"{targets['lands']} lands in total.\n\n"
+            "Respond ONLY with a JSON object:\n"
+            "{\n"
+            '  "picks": {\n'
+            f'    "ramp": [<{targets["ramp"]} pool numbers>],\n'
+            f'    "draw": [<{targets["draw"]} pool numbers>],\n'
+            f'    "removal": [<{targets["removal"]} pool numbers>],\n'
+            f'    "wipe": [<{targets["wipe"]} pool numbers>],\n'
+            f'    "theme": [<{targets["theme"]} pool numbers>],\n'
+            '    "lands": [<nonbasic land pool numbers>]\n'
+            "  },\n"
+            '  "explanation": "<2-4 paragraph plain-text explanation of the deck plan>",\n'
+            '  "notes": ["<optional short bullet>", "..."]\n'
+            "}\n"
+            "Rules:\n"
+            "- Fill each group with EXACTLY the number shown (they add up to "
+            f"{nonland} nonland cards), each list MOST IMPORTANT FIRST, using pool numbers "
+            "(e.g. 12, not \"#12\" or a name). A card goes in only one group. \"theme\" holds "
+            "the creatures, synergy pieces and win conditions that make this deck what it is.\n"
+            "- Basic lands are added automatically - do not pick them - and the server balances "
+            "their colors.\n"
+            "- Only pick numbers from the pool. Every card in it is verified Commander-legal and "
+            "in the deck's colors.\n"
+            f"- {gc_rule}\n"
+            "- Choose the best card for each job regardless of popularity. Cards tagged [new] are "
+            "recent releases and [gem] are theme cards few people play - judge them by their "
+            "rules text. The user wants decks that explore beyond the usual staples: include at "
+            "least 6 cards tagged [new] or [gem] that genuinely fit the plan (more if they are as "
+            "good as the staples), but never at the cost of the deck's core ramp, draw and "
+            "interaction.\n"
+            "- Nonbasic lands: pick enough color fixing for the deck's colors (more for 3+ colors), "
+            "weighting colors by how many mana symbols the spells need, plus a few utility lands "
+            f"that fit the plan - leaving room for basics within the {targets['lands']} lands.\n"
+            "- Keep a sensible mana curve for the bracket.\n\n"
+            "Candidate pool (#number name cost | type [tags] :: rules text for less-known cards):\n"
+            f"{pool_text}\n"
         )
         return await self._generate_json(prompt)
 
@@ -360,60 +469,6 @@ class LLMService:
             f"{_DECK_SCHEMA_INSTRUCTIONS}"
         )
         return await self._generate_json(prompt)
-
-    def _build_prompt(
-        self,
-        commander: dict[str, Any],
-        bracket: int,
-        bracket_description: str,
-        user_prompt: str,
-        recommendations: dict[str, list[dict[str, Any]]],
-        gamechanger_limit: Optional[int] = None,
-        gamechangers: Optional[Iterable[str]] = None,
-        banned_list: Optional[Iterable[str]] = None,
-    ) -> str:
-        """Construct the build-from-scratch prompt sent to the LLM."""
-        ci = "".join(commander.get("color_identity") or []) or "C"
-        rec_lines: list[str] = []
-        for header, cards in recommendations.items():
-            names = ", ".join(c["name"] for c in cards[:40] if c.get("name"))
-            if names:
-                rec_lines.append(f"- {header}: {names}")
-        
-        recs_block = "\n".join(rec_lines) if rec_lines else "(no EDHREC data available)"
-        concept = user_prompt or "(none provided - use the commander's strengths)"
-        gc_block = _gamechanger_block(gamechanger_limit, gamechangers)
-
-        budget_block = ""
-        budgetConstraint = r"/(?:budget|max|limit|under|cost|price)\s*[\$]?\s*(\d+(?:\.\d{2})?)|[\$](\d+(?:\.\d{2})?)\s*(?:dollars|bucks|usd)?/i;"
-        budgetMatch = re.search(budgetConstraint, user_prompt, re.IGNORECASE) if user_prompt else None
-        dollar_pattern = r"[\$](\d+(?:\.\d{2})?)"
-
-        if budgetMatch:
-            budget_block = f"The budget for the deck must be at or under: ${budgetMatch.group(1) or budgetMatch.group(2)}\n\n"
-        
-        budgetMatch = re.search(dollar_pattern, user_prompt, re.IGNORECASE) if user_prompt else None
-        if budgetMatch and not budget_block:
-            budget_block = f"The user mentioned a budget of ${budgetMatch.group(1)}, but it was not clear if this was a constraint. If it is a constraint, the deck must be at or under this budget.\n\n"
-        return (
-            f"You are an expert Magic: The Gathering Commander deck builder.\n\n"
-            f"Commander: {commander.get('name')}\n"
-            f"Type line: {commander.get('type_line')}\n"
-            f"Color identity: {ci}\n"
-            f"Oracle text: {commander.get('oracle_text') or '(none)'}\n\n"
-            f"Bracket {bracket}: {bracket_description}\n\n"
-            f"{gc_block}"
-            f"{budget_block}"
-            f"User's deck concept / prompt (PRIMARY DIRECTION - build around this):\n"
-            f"{concept}\n\n"
-            f"Here is a current list of banned cards. DO NOT include any of these cards at all:\n{json.dumps(list(banned_list or []))}\n\n"
-            f"Remember the commander's color identity is {ci}. Only include cards that share colors with the commander. "
-            f"Universes Beyond cards and cards with alternate printed names are still valid if they are Commander-legal and Scryfall-resolvable. "
-            f"Prefer official Scryfall card names in the final JSON when possible.\n\n"
-            f"EDHREC recommendation pool (reference candidates only - substitute "
-            f"whenever the user's concept or bracket constraints demand it):\n"
-            f"{recs_block}\n\n{_DECK_SCHEMA_INSTRUCTIONS}"
-        )
 
     async def _generate_json(self, prompt: str) -> Optional[dict[str, Any]]:
         """Send a prompt to the configured provider and parse the JSON-mode response."""

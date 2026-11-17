@@ -47,6 +47,24 @@ configure manually before/after deploying publicly.
   instead of re-hitting the LLM/Scryfall/EDHREC. This mainly protects against accidental
   duplicate submissions (double-clicks, retries) and naive repeat-request scripts.
 
+### Access code (optional, recommended for a friends-only deployment)
+
+- Set `ACCESS_CODE` on the backend and share it with the people allowed to use the
+  site. Build/revamp requests without it (in the `X-Access-Code` header) get a 401; the
+  comparison is constant-time. The site shows an "Access code" field when the backend
+  requires one and remembers it in the browser. Leave it empty to disable.
+- This matters behind Render's proxy, where per-IP rate limits see every visitor as the
+  same client - the code is what stops strangers from spending your LLM quota.
+
+### Pinned dependencies
+
+- `backend/requirements-lock.txt` pins every backend package to an exact, hash-checked
+  version for Python 3.12 on Linux, and Render installs from it with `--require-hashes`.
+  `requirements.txt` keeps the human-edited version ranges. Regenerate the lock after
+  changing `requirements.txt` with the command at the top of the lock file.
+- `.github/dependabot.yml` opens weekly update PRs (grouped minor/patch for pip and npm,
+  separate PRs for major versions) so upgrades are reviewed instead of arriving silently.
+
 ### Bot verification (Cloudflare Turnstile, optional)
 
 - Backend: set `TURNSTILE_SECRET_KEY` to require a valid Turnstile token on every

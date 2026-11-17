@@ -8,6 +8,10 @@
 - ~~LLM land counts are inconsistent~~ done: new builds are held to 34-40 lands (end-of-list
   non-ramp spells become basics when short; excess basics become top EDHREC spells when over).
   Revamps are not adjusted. Possible follow-up: make the range depend on bracket / average CMC.
+- ~~Use all legal cards (new and unpopular)~~ done: builds pick from a validated pool built from
+  EDHREC + Scryfall role/theme/newest searches (see CLAUDE.md "Deck building pipeline").
+  Follow-ups: apply the pool approach to revamps; enforce budgets in code using pool prices;
+  load Scryfall bulk data locally to cut request time further.
 - If a revamp is done, persist the previous decklist and dont default to the heuristic build
 - ~~Add security measures in place to ensure malicious users dont overload APIs or spam requests to the LLM~~ done:
   per-IP rate limiting (5/min, 50/day) on build/revamp, a shared daily Gemini call budget with

@@ -1,4 +1,5 @@
 import React, { useEffect, useState } from 'react';
+import AccessCodeField from './components/AccessCodeField';
 import DeckForm from './components/DeckForm';
 import DeckResult from './components/DeckResult';
 import { buildDeck, fetchHealth, revampDeck, fetchBannedListAndGamechangers } from './api';
@@ -284,6 +285,7 @@ export default function App(): React.ReactElement {
           Powered by Scryfall and EDHREC
           {health?.llm_enabled ? `, with ${health.llm_provider || 'LLM'} guidance` : ''}.
         </p>
+        {health?.access_code_required && <AccessCodeField />}
         {health && !health.llm_enabled && (
           <p className="warning">
             No LLM API key configured - decks will be built heuristically. Set GEMINI_API_KEY

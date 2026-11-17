@@ -18,11 +18,35 @@ function apiUrl(path: string): string {
   return `${API_BASE}${path}`;
 }
 
+const ACCESS_CODE_KEY = 'mtg_access_code';
+
+export function getAccessCode(): string {
+  /** Read the saved access code (empty if none, or if storage is unavailable). */
+  try {
+    return localStorage.getItem(ACCESS_CODE_KEY) || '';
+  } catch {
+    return '';
+  }
+}
+
+export function setAccessCode(code: string): void {
+  /** Save (or clear, when empty) the access code for future build/revamp requests. */
+  try {
+    if (code) localStorage.setItem(ACCESS_CODE_KEY, code);
+    else localStorage.removeItem(ACCESS_CODE_KEY);
+  } catch {
+    // Storage blocked (private mode etc.) - the code just won't persist.
+  }
+}
+
 async function postJson<T>(path: string, body: unknown): Promise<T> {
   /** Post JSON to the backend and parse the typed JSON response. */
+  const headers: Record<string, string> = { 'Content-Type': 'application/json' };
+  const accessCode = getAccessCode();
+  if (accessCode) headers['X-Access-Code'] = accessCode;
   const response = await fetch(apiUrl(path), {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
+    headers,
     body: JSON.stringify(body),
   });
   if (!response.ok) {

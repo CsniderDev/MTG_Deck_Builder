@@ -7,6 +7,7 @@ by category and pads the mana base with basic lands.
 """
 from __future__ import annotations
 from collections import Counter
+import asyncio
 import hashlib
 import json
 import re
@@ -28,7 +29,16 @@ from ..models.schemas import (
     ScryfallImageUris,
 )
 from .edhrec import EDHRecClient, EDHRecError
-from .llm import LLMService
+from .card_pool import (
+    CardPool,
+    assemble_deck,
+    build_card_pool,
+    clamp_targets,
+    prefetch_base_searches,
+    render_pool,
+    sanitize_theme_queries,
+)
+from .llm import LLMService, _budget_block
 from .scryfall import ScryfallClient, ScryfallError
 
 logger = logging.getLogger(__name__)
@@ -108,7 +118,11 @@ class DeckBuilder:
         return hashlib.sha256(json.dumps(payload, sort_keys=True).encode()).hexdigest()
 
     async def build(self, request: BuildDeckRequest) -> DeckResponse:
-        """Build a new deck from a commander, optionally using an LLM for card selection."""
+        """Build a new deck: plan (LLM), gather a validated card pool, pick (LLM), assemble.
+
+        Without a deck concept the LLM is skipped and the deck is assembled from the
+        same pool using default role targets, ranked by EDHREC data.
+        """
         cache_key = self._build_cache_key(request)
         cached = self._cache_get(cache_key)
         if cached is not None:
@@ -120,86 +134,106 @@ class DeckBuilder:
             request.secondary_commander,
         )
         command_zone = self._combine_command_zone(commander_card, secondary_commander_card)
-        recommendations = await self._fetch_recommendations(commander_card["name"])
+        command_cards = [c for c in (commander_card, secondary_commander_card) if c]
+        identity = set(command_zone.get("color_identity") or [])
+        deck_size = DECK_SIZE_WITH_PARTNER if secondary_commander_card else DECK_SIZE
         bracket_desc = BRACKET_DESCRIPTIONS[request.bracket]
         limit = gamechanger_limit(request.bracket)
         has_prompt = bool((request.prompt or "").strip())
         banned_list = set(name.strip().lower() for name in request.banned_list or [])
-        gamechangers = set(name.strip().lower() for name in request.gamechangers or [])
+        gamechangers = set(name.strip().lower() for name in request.gamechangers or []) or {
+            name.lower() for name in GAMECHANGERS
+        }
 
-        llm_result: Optional[dict[str, Any]] = None
-        prefetched_cards: dict[str, dict[str, Any]] = {}
+        if has_prompt and not self._llm.enabled:
+            raise DeckBuilderError(
+                "A deck concept was provided but no LLM API key is configured. "
+                "Set GEMINI_API_KEY (or LLM_PROVIDER=openai with OPENAI_API_KEY) in "
+                "backend/.env to enable LLM-driven builds, "
+                "or clear the deck concept to use a heuristic build instead."
+            )
+
+        # Step 1 (LLM): plan the strategy, role counts and theme searches. Runs
+        # alongside the EDHREC fetch since neither depends on the other.
+        plan: dict[str, Any] = {}
         if has_prompt:
-            if not self._llm.enabled:
-                raise DeckBuilderError(
-                    "A deck concept was provided but no LLM API key is configured. "
-                    "Set GEMINI_API_KEY (or LLM_PROVIDER=openai with OPENAI_API_KEY) in "
-                    "backend/.env to enable LLM-driven builds, "
-                    "or clear the deck concept to use a heuristic build instead."
-                )
             logger.info(
                 "Build request: commander=%s bracket=%s prompt_chars=%d",
                 command_zone.get("name"),
                 request.bracket,
                 len(request.prompt or ""),
             )
-            llm_result = await self._llm.build_deck(
-                commander=command_zone,
-                bracket=request.bracket,
-                bracket_description=bracket_desc,
-                user_prompt=request.prompt,
-                recommendations=recommendations,
-                gamechanger_limit=limit,
-                gamechangers=gamechangers,
-                banned_list=banned_list,
+            plan_result, recommendations, _ = await asyncio.gather(
+                self._llm.plan_deck(
+                    commander=command_zone,
+                    bracket=request.bracket,
+                    bracket_description=bracket_desc,
+                    user_prompt=request.prompt,
+                    gamechanger_limit=limit,
+                ),
+                self._fetch_recommendations(commander_card["name"]),
+                prefetch_base_searches(self._scryfall, command_cards),
             )
-            if llm_result is None:
-                logger.warning(
-                    "LLM build returned None for commander=%s bracket=%s; surfacing 400.",
-                    command_zone.get("name"),
-                    request.bracket,
-                )
-                raise DeckBuilderError(self._llm_failure_message("deck"))
-
-        if llm_result:
-            prefetched_cards, invalid_cards = await self.validate_decklist(
-                llm_result.get("decklist") or [], command_zone.get("color_identity", [])
-            )
+            if plan_result is None:
+                raise DeckBuilderError(self._llm_failure_message("deck plan"))
+            plan = plan_result
         else:
-            invalid_cards = []
-        if invalid_cards: 
-            llm_result = await self._llm.build_deck(
-                commander=command_zone,
-                bracket=request.bracket,
-                bracket_description=bracket_desc,
-                user_prompt=request.prompt,
-                recommendations=recommendations,
-                gamechanger_limit=limit,
-                gamechangers=gamechangers,
-                banned_list=banned_list,
-            )
-            prefetched_cards = {}
+            recommendations = await self._fetch_recommendations(commander_card["name"])
+        targets = clamp_targets(plan.get("targets"), deck_size)
+        theme_queries = sanitize_theme_queries(plan.get("theme_queries"))
 
-        decklist, explanation, source, notes, substitutions = self._materialize(
-            llm_result,
-            command_zone,
-            recommendations,
-            request.bracket,
-            gamechangers,
-            secondary_commander_card,
-            prefetched_cards,
-        )
-        decklist = await self._hydrate_cards(decklist, prefetched_cards)
-        command_cards = [c for c in (commander_card, secondary_commander_card) if c]
-        decklist = await self._enforce_land_count(
-            decklist,
+        # Step 2: a numbered pool of real, legal, on-color candidates.
+        pool = await build_card_pool(
+            self._scryfall,
             command_cards,
             recommendations,
-            banned_list | (gamechangers or {name.lower() for name in GAMECHANGERS}),
-            notes,
+            theme_queries,
+            banned_list,
+            gamechangers,
+            limit,
+        )
+
+        # Step 3 (LLM): pick from the pool by number.
+        notes: list[str] = []
+        picks: list[Any] = []
+        if has_prompt:
+            selection = await self._llm.select_cards(
+                commander=command_zone,
+                bracket=request.bracket,
+                bracket_description=bracket_desc,
+                user_prompt=request.prompt,
+                plan=plan,
+                targets=targets,
+                pool_text=render_pool(pool, include_prices=bool(_budget_block(request.prompt))),
+                deck_size=deck_size,
+                gamechanger_limit=limit,
+            )
+            if selection is None or not isinstance(selection.get("picks"), (list, dict)):
+                raise DeckBuilderError(self._llm_failure_message("deck"))
+            picks = selection["picks"]
+            strategy = str(plan.get("strategy") or "").strip()
+            explanation = str(selection.get("explanation") or "").strip() or strategy or "(no explanation provided)"
+            extra_notes = selection.get("notes")
+            if isinstance(extra_notes, list):
+                notes.extend(str(n) for n in extra_notes if n)
+            if theme_queries:
+                notes.append(f"Searched for theme cards with: {'; '.join(theme_queries)}.")
+            source = "llm"
+        else:
+            explanation = _heuristic_explanation(commander_card, recommendations)
+            notes.append(
+                "Built without an LLM - role staples and top EDHREC picks from the candidate pool."
+            )
+            source = "heuristic"
+
+        # Step 4 (code): exact-size deck, roles filled, land count and colors balanced.
+        decklist = assemble_deck(pool, picks, targets, deck_size, identity, limit, notes)
+        decklist = await self._hydrate_cards(decklist, {card.key: card.data for card in pool.cards})
+        decklist = await self._enforce_land_count(
+            decklist, command_cards, recommendations, banned_list | gamechangers, notes
         )
         decklist = await self._balance_basics(decklist, command_cards, notes)
-        substitutions = await self._hydrate_substitutions(substitutions, prefetched_cards)
+        notes.extend(_exploration_note(pool, decklist))
         response = DeckResponse(
             version=1,
             commander=_to_card(commander_card),
@@ -210,7 +244,7 @@ class DeckBuilder:
             decklist=decklist,
             explanation=explanation,
             notes=notes,
-            substitutions=substitutions,
+            substitutions=[],
             source=source,
         )
         self._cache_set(cache_key, response)
@@ -320,6 +354,18 @@ class DeckBuilder:
             prefetched_cards, invalid_cards = await self.validate_decklist(
                 llm_result.get("decklist") or [], command_zone.get("color_identity", [])
             )
+            if invalid_cards:
+                llm_result = {
+                    **llm_result,
+                    "decklist": [
+                        entry
+                        for entry in llm_result.get("decklist") or []
+                        if isinstance(entry, dict)
+                        and str(entry.get("name") or "").strip().lower() in prefetched_cards
+                    ],
+                    "notes": list(llm_result.get("notes") or [])
+                    + [f"Removed invalid card(s): {', '.join(invalid_cards)}."],
+                }
             decklist, explanation, source, notes, substitutions = self._materialize(
                 llm_result,
                 command_zone,
@@ -1228,6 +1274,25 @@ def _heuristic_decklist(
         if len(picks) >= target_nonland:
             break
     return picks
+
+
+def _exploration_note(pool: CardPool, decklist: list[MagicCard]) -> list[str]:
+    """Summarize how many recent releases and lesser-played theme cards made the deck."""
+    in_deck = {card.name.lower() for card in decklist}
+
+    def listing(tag: str) -> list[str]:
+        return [c.name for c in pool.cards if c.key in in_deck and tag in c.tags]
+
+    def describe(names: list[str], label: str) -> str:
+        shown = ", ".join(names[:6]) + ("..." if len(names) > 6 else "")
+        return f"{len(names)} {label} ({shown})"
+
+    parts = []
+    if new_cards := listing("new"):
+        parts.append(describe(new_cards, "recent release(s)"))
+    if gems := listing("gem"):
+        parts.append(describe(gems, "lesser-played theme card(s)"))
+    return [f"Beyond the usual staples: {'; '.join(parts)}."] if parts else []
 
 
 def _heuristic_explanation(

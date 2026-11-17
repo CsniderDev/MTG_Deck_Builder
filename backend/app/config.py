@@ -42,6 +42,9 @@ class Settings(BaseSettings):
     # Cloudflare Turnstile secret key. Leave empty to disable bot verification
     # entirely (the default, safe for local development).
     turnstile_secret_key: str = ""
+    # Shared access code for a friends-only deployment. When set, build/revamp
+    # requests must send it in the X-Access-Code header. Empty disables the check.
+    access_code: str = ""
     # Set to true only when deployed behind a trusted reverse proxy/CDN (e.g.
     # Cloudflare, nginx) that overwrites X-Forwarded-For itself. If the app is
     # ever directly internet-facing, leave this false - X-Forwarded-For is a

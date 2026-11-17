@@ -1,6 +1,7 @@
 """FastAPI entry point for the MTG Commander deck builder."""
 from __future__ import annotations
 
+import hmac
 import logging
 from contextlib import asynccontextmanager
 from typing import Optional
@@ -116,6 +117,17 @@ async def _security_headers(request: Request, call_next):
     return response
 
 
+def _require_access_code(request: Request) -> None:
+    """Reject LLM-triggering requests without the shared access code (when one is configured)."""
+    expected = settings.access_code
+    if not expected:
+        return
+    provided = request.headers.get("x-access-code", "")
+    if not hmac.compare_digest(provided.encode(), expected.encode()):
+        logger.warning("Rejected request with a missing/wrong access code from %s", _client_ip_key(request))
+        raise HTTPException(status_code=401, detail="Access code required. Ask the site owner for it.")
+
+
 _TURNSTILE_VERIFY_URL = "https://challenges.cloudflare.com/turnstile/v0/siteverify"
 
 
@@ -148,6 +160,7 @@ async def health() -> dict[str, object]:
         "llm_provider": getattr(app.state.llm, "provider_label", None),
         "llm_calls_today": getattr(app.state.llm, "calls_today", None),
         "llm_daily_call_limit": getattr(app.state.llm, "daily_call_limit", None),
+        "access_code_required": bool(settings.access_code),
     }
 
 
@@ -156,6 +169,7 @@ async def health() -> dict[str, object]:
 @limiter.limit(_BUILD_DAILY_LIMIT)
 async def build_deck(request: Request, payload: BuildDeckRequest) -> DeckResponse:
     """Build a brand-new commander deck from a commander and optional concept prompt."""
+    _require_access_code(request)
     if not await _verify_turnstile_token(payload.turnstile_token, _client_ip_key(request)):
         raise HTTPException(status_code=400, detail="Human verification failed. Please retry.")
     try:
@@ -169,6 +183,7 @@ async def build_deck(request: Request, payload: BuildDeckRequest) -> DeckRespons
 @limiter.limit(_BUILD_DAILY_LIMIT)
 async def revamp_deck(request: Request, payload: RevampDeckRequest) -> DeckResponse:
     """Revise an existing decklist according to the user's requested changes."""
+    _require_access_code(request)
     if not await _verify_turnstile_token(payload.turnstile_token, _client_ip_key(request)):
         raise HTTPException(status_code=400, detail="Human verification failed. Please retry.")
     try:

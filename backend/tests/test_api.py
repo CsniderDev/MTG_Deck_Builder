@@ -259,3 +259,23 @@ def test_revamp_endpoint_success(client):
     assert body["version"] == 1
     assert body["substitutions"] == []
     assert sum(c["count"] for c in body["decklist"]) == 99
+
+
+def test_access_code_required_when_configured(client, monkeypatch):
+    monkeypatch.setattr(main_module.settings, "access_code", "friends-only")
+    payload = {"commander": "Atraxa", "bracket": 3, "prompt": ""}
+
+    assert client.get("/api/health").json()["access_code_required"] is True
+    missing = client.post("/api/decks/build", json=payload)
+    assert missing.status_code == 401
+    assert "access code" in missing.json()["detail"].lower()
+    wrong = client.post("/api/decks/build", json=payload, headers={"X-Access-Code": "nope"})
+    assert wrong.status_code == 401
+    ok = client.post("/api/decks/build", json=payload, headers={"X-Access-Code": "friends-only"})
+    assert ok.status_code == 200, ok.text
+
+
+def test_access_code_not_required_by_default(client):
+    assert client.get("/api/health").json()["access_code_required"] is False
+    response = client.post("/api/decks/build", json={"commander": "Atraxa", "bracket": 3, "prompt": ""})
+    assert response.status_code == 200

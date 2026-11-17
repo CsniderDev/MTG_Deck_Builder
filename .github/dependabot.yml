@@ -1,0 +1,25 @@
+# Weekly dependency update PRs. Merging one redeploys Render (backend) or Pages
+# (frontend), so check that the PR's checks pass first.
+version: 2
+updates:
+  - package-ecosystem: pip
+    directory: /backend
+    schedule:
+      interval: weekly
+    groups:
+      # One PR for all minor/patch bumps; major versions get their own PRs.
+      backend-minor-and-patch:
+        update-types: [minor, patch]
+
+  - package-ecosystem: npm
+    directory: /frontend
+    schedule:
+      interval: weekly
+    groups:
+      frontend-minor-and-patch:
+        update-types: [minor, patch]
+
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: monthly

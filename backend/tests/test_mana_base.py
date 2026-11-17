@@ -167,6 +167,12 @@ class _ColoredScryfall:
     async def get_collection(self, names):
         return [self._card(n) for n in names]
 
+    async def search(self, query, order="edhrec", direction="auto", limit=175):
+        # Every search returns the test's catalog, so all of it lands in the pool.
+        if "new:card" in query:
+            return []
+        return [self._card(n) for n in getattr(self, "catalog", [])]
+
     async def get_card(self, name):
         return self._card(name)
 
@@ -190,18 +196,20 @@ class _FixedLLM:
     enabled = True
     provider_label = "Fake"
     last_failure_reason = None
+    PICKS = ["Red Card", "Green Card"] + [f"Filler {i}" for i in range(61)]
 
-    async def build_deck(self, **kwargs):
-        # An even 18/18 basic split the balancer should correct to 75/25 (R:3, G:1).
-        decklist = [{"name": "Red Card", "count": 1}, {"name": "Green Card", "count": 1}]
-        decklist += [{"name": f"Filler {i}", "count": 1} for i in range(61)]
-        decklist += [{"name": "Mountain", "count": 18}, {"name": "Forest", "count": 18}]
-        return {"decklist": decklist, "explanation": "test", "notes": [], "substitutions": []}
+    async def plan_deck(self, **kwargs):
+        return {"strategy": "test", "targets": {"lands": 36}, "theme_queries": ["o:test"]}
+
+    async def select_cards(self, **kwargs):
+        return {"picks": list(self.PICKS), "explanation": "test", "notes": []}
 
 
 @pytest.mark.asyncio
 async def test_build_rebalances_llm_basics_to_pip_share():
-    builder = DeckBuilder(_ColoredScryfall(), _NoEdhrec(), _FixedLLM())
+    scryfall = _ColoredScryfall()
+    scryfall.catalog = list(_FixedLLM.PICKS)
+    builder = DeckBuilder(scryfall, _NoEdhrec(), _FixedLLM())
     response = await builder.build(BuildDeckRequest(commander="Test", bracket=3, prompt="go"))
     lands = {c.name: c.count for c in response.decklist if c.name in {"Mountain", "Forest"}}
     assert lands == {"Mountain": 27, "Forest": 9}
@@ -334,64 +342,63 @@ class _GuardEdhrec:
         pass
 
 
-class _ListLLM(_FixedLLM):
-    def __init__(self, decklist):
-        self._decklist = decklist
-
-    async def build_deck(self, **kwargs):
-        return {"decklist": self._decklist, "explanation": "test", "notes": [], "substitutions": []}
+_RG = [{"name": "Test RG Commander", "color_identity": ["R", "G"], "mana_cost": "{2}"}]
 
 
-def _lands_in(response):
-    return sum(c.count for c in response.decklist if c.type_line and "Land" in c.type_line)
+def _typed(name, type_line, count=1, produced=None):
+    return MagicCard(name=name, count=count, type_line=type_line, produced_mana=produced or [])
+
+
+def _lands(deck):
+    return sum(c.count for c in deck if c.type_line and "Land" in c.type_line or c.name in {"Mountain", "Forest"})
 
 
 @pytest.mark.asyncio
 async def test_too_few_lands_swaps_last_spells_for_basics():
-    decklist = [{"name": "Red Card"}, {"name": "Green Card"}]
-    decklist += [{"name": f"Spell {i}"} for i in range(67)]
-    decklist += [{"name": f"Land {i}"} for i in range(10)] + [{"name": "Mountain", "count": 20}]
-    builder = DeckBuilder(_GuardScryfall(), _NoEdhrec(), _ListLLM(decklist))
-    response = await builder.build(BuildDeckRequest(commander="Test", bracket=3, prompt="go"))
+    deck = [_typed("Red Card", "Sorcery"), _typed("Green Card", "Sorcery")]
+    deck += [_typed(f"Spell {i}", "Sorcery") for i in range(67)]
+    deck += [_typed(f"Land {i}", "Land") for i in range(10)] + [_typed("Mountain", "Basic Land - Mountain", 20)]
+    builder = DeckBuilder(_GuardScryfall(), _NoEdhrec(), _FixedLLM())
+    notes = []
+    deck = await builder._enforce_land_count(deck, _RG, {}, set(), notes)
 
-    names = {c.name for c in response.decklist}
-    assert sum(c.count for c in response.decklist) == 99
-    assert _lands_in(response) == 34
+    names = {c.name for c in deck}
+    assert sum(c.count for c in deck) == 99
+    assert _lands(deck) == 34
     # The 4 cuts come from the end of the spell list; the first spells survive.
     assert {"Spell 63", "Spell 64", "Spell 65", "Spell 66"}.isdisjoint(names)
     assert {"Red Card", "Green Card", "Spell 0"} <= names
-    assert any("Deck had only 30 lands" in n and "Spell 66" in n for n in response.notes)
+    assert any("Deck had only 30 lands" in n and "Spell 66" in n for n in notes)
 
 
 @pytest.mark.asyncio
 async def test_too_many_lands_swaps_basics_for_top_edhrec_spells():
-    decklist = [{"name": "Red Card"}, {"name": "Green Card"}]
-    decklist += [{"name": f"Spell {i}"} for i in range(53)]
-    decklist += [{"name": f"Land {i}"} for i in range(4)] + [{"name": "Mountain", "count": 40}]
-    builder = DeckBuilder(_GuardScryfall(), _GuardEdhrec(), _ListLLM(decklist))
-    response = await builder.build(
-        BuildDeckRequest(commander="Test", bracket=3, prompt="go", banned_list=["Banned Spell"])
-    )
+    deck = [_typed("Red Card", "Sorcery"), _typed("Green Card", "Sorcery")]
+    deck += [_typed(f"Spell {i}", "Sorcery") for i in range(53)]
+    deck += [_typed(f"Land {i}", "Land") for i in range(4)] + [_typed("Mountain", "Basic Land - Mountain", 40)]
+    builder = DeckBuilder(_GuardScryfall(), _GuardEdhrec(), _FixedLLM())
+    recommendations = _GuardEdhrec.extract_recommendations({})
+    notes = []
+    deck = await builder._enforce_land_count(deck, _RG, recommendations, {"banned spell"}, notes)
 
-    names = {c.name for c in response.decklist}
-    assert sum(c.count for c in response.decklist) == 99
-    assert _lands_in(response) == 40
+    names = {c.name for c in deck}
+    assert sum(c.count for c in deck) == 99
+    assert _lands(deck) == 40
     assert {"Popular Spell", "Second Spell", "Third Spell", "Fourth Spell"} <= names
     assert not {"Banned Spell", "EDHREC Land", "Should Not Pick (land header)"} & names
     # Basics absorb the cuts; nonbasic lands are kept.
     assert all(f"Land {i}" in names for i in range(4))
-    assert any("Deck had 44 lands" in n and "Popular Spell" in n for n in response.notes)
+    assert any("Deck had 44 lands" in n and "Popular Spell" in n for n in notes)
 
 
 @pytest.mark.asyncio
 async def test_land_count_in_range_is_left_alone():
-    decklist = [{"name": "Red Card"}, {"name": "Green Card"}]
-    decklist += [{"name": f"Spell {i}"} for i in range(60)]
-    decklist += [{"name": "Mountain", "count": 37}]
-    builder = DeckBuilder(_GuardScryfall(), _GuardEdhrec(), _ListLLM(decklist))
-    response = await builder.build(BuildDeckRequest(commander="Test", bracket=3, prompt="go"))
-    assert _lands_in(response) == 37
-    assert not any("lands (more than" in n or "Deck had only" in n for n in response.notes)
+    deck = [_typed(f"Spell {i}", "Sorcery") for i in range(62)] + [_typed("Mountain", "Basic Land - Mountain", 37)]
+    builder = DeckBuilder(_GuardScryfall(), _GuardEdhrec(), _FixedLLM())
+    notes = []
+    deck = await builder._enforce_land_count(deck, _RG, _GuardEdhrec.extract_recommendations({}), set(), notes)
+    assert _lands(deck) == 37
+    assert notes == []
 
 
 def test_swap_skips_mana_rocks_and_dorks_unless_nothing_else():

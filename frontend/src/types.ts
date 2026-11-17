@@ -55,6 +55,8 @@ export interface HealthStatus {
   llm_enabled: boolean;
   /** Human-friendly name of the active LLM ("Gemini", "ChatGPT"), or null when disabled. */
   llm_provider?: string | null;
+  /** True when the server requires an access code for build/revamp requests. */
+  access_code_required?: boolean;
 }
 
 export interface CommanderCompanionOptionsResponse {

@@ -276,3 +276,41 @@ async def test_get_commander_companion_options_returns_partner_choices():
     assert payload["relationship"] == "Partner"
     assert payload["secondary_kind"] == "commander"
     assert payload["options"] == ["Thrasios, Triton Hero"]
+
+
+@pytest.mark.asyncio
+async def test_rate_limited_request_is_retried_after_retry_after(monkeypatch):
+    import app.services.scryfall as scryfall_module
+
+    sleeps = []
+
+    async def fake_sleep(seconds):
+        sleeps.append(seconds)
+
+    monkeypatch.setattr(scryfall_module.asyncio, "sleep", fake_sleep)
+    with respx.mock(base_url="https://api.scryfall.com") as router:
+        route = router.get("/cards/named").mock(
+            side_effect=[
+                httpx.Response(429, headers={"Retry-After": "2"}, json={"object": "error"}),
+                httpx.Response(200, json=_atraxa()),
+            ]
+        )
+        client = ScryfallClient()
+        try:
+            card = await client.named("atraxa")
+        finally:
+            await client.aclose()
+    assert card["name"] == "Atraxa, Praetors' Voice"
+    assert route.call_count == 2
+    assert 2.0 in sleeps
+
+
+@pytest.mark.asyncio
+async def test_search_returns_empty_list_when_nothing_matches():
+    with respx.mock(base_url="https://api.scryfall.com") as router:
+        router.get("/cards/search").mock(return_value=httpx.Response(404, json={"object": "error"}))
+        client = ScryfallClient()
+        try:
+            assert await client.search("o:nothingmatchesthis") == []
+        finally:
+            await client.aclose()
