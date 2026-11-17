@@ -159,10 +159,7 @@ class DeckBuilder:
                     command_zone.get("name"),
                     request.bracket,
                 )
-                raise DeckBuilderError(
-                    f"{getattr(self._llm, 'provider_label', None) or 'The LLM'} failed to produce a valid deck. Check backend logs and "
-                    "retry, or clear the deck concept to use a heuristic build."
-                )
+                raise DeckBuilderError(self._llm_failure_message("deck"))
 
         if llm_result:
             prefetched_cards, invalid_cards = await self.validate_decklist(
@@ -294,7 +291,12 @@ class DeckBuilder:
         )
         if llm_result is None:
             llm_failed = True
-            notes = ["LLM unavailable - kept the current decklist instead of revamping."]
+            reason = getattr(self._llm, "last_failure_reason", None)
+            notes = [
+                "LLM unavailable"
+                + (f" ({reason})" if reason else "")
+                + " - kept the current decklist instead of revamping."
+            ]
             substitutions = []
             decklist = _normalize_decklist(
                 previous_payload,
@@ -334,6 +336,16 @@ class DeckBuilder:
         )
         self._cache_set(cache_key, response)
         return response
+
+    def _llm_failure_message(self, what: str) -> str:
+        """Explain an LLM failure to the user, including the (client-safe) reason when known."""
+        label = getattr(self._llm, "provider_label", None) or "The LLM"
+        reason = getattr(self._llm, "last_failure_reason", None)
+        detail = f": {reason}." if reason else "."
+        return (
+            f"{label} failed to produce a valid {what}{detail} Retry, or clear the deck concept "
+            "to use a heuristic build."
+        )
 
     async def _resolve_commander(self, name: str) -> dict[str, Any]:
         """Resolve a commander name through Scryfall and surface user-safe errors."""

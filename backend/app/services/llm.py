@@ -126,6 +126,23 @@ def _compact_decklist_for_prompt(previous_decklist: list[dict[str, Any]]) -> lis
     return compact_cards
 
 
+def _classify_llm_error(exc: Exception) -> str:
+    """Map a provider exception to a short, client-safe reason (never raw upstream text)."""
+    status = getattr(exc, "status_code", None) or getattr(exc, "code", None)
+    message = f"{type(exc).__name__} {exc}".upper()
+    if status == 429 or "429" in message or "RESOURCE_EXHAUSTED" in message or "QUOTA" in message:
+        return "rate limited or out of quota at the provider - wait a minute and retry"
+    if status in (500, 502, 503, 504) or "UNAVAILABLE" in message or "OVERLOADED" in message:
+        return "the model is overloaded or temporarily unavailable - retry shortly"
+    if status in (401, 403) or "API_KEY" in message or "API KEY" in message or "PERMISSION" in message:
+        return "the API key was rejected - check the key configured on the server"
+    if status == 404 or "NOT_FOUND" in message:
+        return "the configured model was not found - check the model setting on the server"
+    if "TIMEOUT" in message or "TIMED OUT" in message:
+        return "the request to the model timed out"
+    return f"unexpected error calling the model ({type(exc).__name__})"
+
+
 class LLMService:
     def __init__(self) -> None:
         """Initialize the configured LLM provider when its API key is set."""
@@ -150,6 +167,9 @@ class LLMService:
         self._circuit_cooldown_seconds = settings.llm_circuit_cooldown_seconds
         self._consecutive_failures = 0
         self._circuit_open_until = 0.0
+
+        # Short, client-safe description of why the most recent call returned None.
+        self.last_failure_reason: Optional[str] = None
 
     @property
     def enabled(self) -> bool:
@@ -371,9 +391,16 @@ class LLMService:
     async def _generate_json(self, prompt: str) -> Optional[dict[str, Any]]:
         """Send a prompt to the configured provider and parse the JSON-mode response."""
         provider = self._provider
+        self.last_failure_reason = None
         if provider is None:
+            self.last_failure_reason = "no LLM is configured"
             return None
         if self._circuit_open():
+            remaining = max(0, int(self._circuit_open_until - time.monotonic()))
+            self.last_failure_reason = (
+                f"paused after {self._circuit_failure_threshold} failed calls in a row - "
+                f"retry in about {remaining}s"
+            )
             logger.warning(
                 "%s circuit breaker is open after repeated failures; skipping request "
                 "and falling back to the heuristic path.",
@@ -381,6 +408,9 @@ class LLMService:
             )
             return None
         if not self._check_and_increment_budget():
+            self.last_failure_reason = (
+                f"the daily limit of {self._daily_call_limit} LLM calls has been reached"
+            )
             logger.warning(
                 "Daily LLM call budget (%d) exhausted; skipping request and falling back "
                 "to the heuristic path.",
@@ -391,7 +421,8 @@ class LLMService:
             "%s request: model=%s prompt_chars=%d", provider.label, provider.model, len(prompt)
         )
         text: Optional[str] = None
-        retry_delays = [0.0, 0.75, 1.5]
+        # Overload/rate-limit errors from free tiers usually clear within a few seconds.
+        retry_delays = [0.0, 2.0, 5.0]
         for attempt, delay in enumerate(retry_delays, start=1):
             if delay:
                 await asyncio.sleep(delay)
@@ -400,6 +431,7 @@ class LLMService:
                 break
             except LLMEmptyResponseError as exc:
                 logger.error("%s returned empty text. %s", provider.label, exc)
+                self.last_failure_reason = "the model returned an empty response (it may have been blocked or cut off)"
                 self._record_llm_failure()
                 return None
             except Exception as exc:  # noqa: BLE001 - propagate as None, log details
@@ -413,9 +445,11 @@ class LLMService:
                     )
                     continue
                 logger.exception("%s request raised: %s", provider.label, exc)
+                self.last_failure_reason = _classify_llm_error(exc)
                 self._record_llm_failure()
                 return None
         if text is None:
+            self.last_failure_reason = "the model returned no response"
             self._record_llm_failure()
             return None
         logger.info("%s response: %d chars", provider.label, len(text))
@@ -426,6 +460,7 @@ class LLMService:
                 provider.label,
                 text[:500],
             )
+            self.last_failure_reason = "the model's reply was not valid JSON (it may have been cut off)"
             self._record_llm_failure()
         else:
             self._record_llm_success()

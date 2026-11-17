@@ -261,3 +261,37 @@ async def test_circuit_breaker_resets_after_a_success(monkeypatch):
     result = await svc._generate_json("prompt")  # failure #1 again, still below threshold
     assert result is None
     assert svc._circuit_open() is False
+
+
+# --- Client-facing failure reasons ------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_failure_reason_reports_rate_limit(monkeypatch):
+    monkeypatch.setattr("app.services.llm.asyncio.sleep", _no_sleep)
+    svc = _service_with_fake(monkeypatch, [RuntimeError("429 RESOURCE_EXHAUSTED: quota")])
+    assert await svc._generate_json("prompt") is None
+    assert "rate limited" in svc.last_failure_reason
+    assert "RESOURCE_EXHAUSTED" not in svc.last_failure_reason  # no raw upstream text
+
+
+@pytest.mark.asyncio
+async def test_failure_reason_reports_open_circuit(monkeypatch):
+    svc = _service_with_fake(
+        monkeypatch,
+        [RuntimeError("boom")],
+        _circuit_failure_threshold=1,
+        _circuit_cooldown_seconds=60.0,
+    )
+    await svc._generate_json("prompt")
+    assert await svc._generate_json("prompt") is None
+    assert "paused after 1 failed" in svc.last_failure_reason
+
+
+@pytest.mark.asyncio
+async def test_failure_reason_cleared_on_success(monkeypatch):
+    svc = _service_with_fake(monkeypatch, [RuntimeError("boom"), _OK_JSON])
+    await svc._generate_json("prompt")
+    assert svc.last_failure_reason is not None
+    assert await svc._generate_json("prompt") is not None
+    assert svc.last_failure_reason is None
