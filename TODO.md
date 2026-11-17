@@ -4,7 +4,11 @@
 - Ensure mana production mirrors mana costs. right now it seems to be just leveraging an even spread mana base where it needs to better 
   match what the costs are.
 - If a revamp is done, persist the previous decklist and dont default to the heuristic build
-- Add security measures in place to ensure malicious users dont overload APIs or spam requests to the LLM
+- ~~Add security measures in place to ensure malicious users dont overload APIs or spam requests to the LLM~~ done:
+  per-IP rate limiting (5/min, 50/day) on build/revamp, a shared daily Gemini call budget with
+  fallback to heuristic, a circuit breaker on repeated Gemini failures, response caching for
+  duplicate requests, optional Cloudflare Turnstile bot verification, and request size caps.
+  See `SECURITY.md` for the full list plus manual deployment steps (Cloudflare, budget alerts, HTTPS).
 
 
 ### 1. "Salt Score" & Power Level Calibration

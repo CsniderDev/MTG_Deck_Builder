@@ -3,6 +3,7 @@ import type { DeckResponse, DeckSubstitution, MagicCard } from '../types';
 import MagicCardItem from './MagicCard';
 import DeckStats from './DeckStats';
 import DeckDiff from './DeckDiff';
+import TurnstileWidget from './TurnstileWidget';
 
 function buildDeckText(deck: DeckResponse): string {
   /** Convert a rendered deck into a text decklist suitable for clipboard export. */
@@ -24,7 +25,7 @@ function buildDeckText(deck: DeckResponse): string {
 
 export interface DeckResultProps {
   deck: DeckResponse;
-  onRevamp: (changeRequest: string) => Promise<boolean>;
+  onRevamp: (changeRequest: string, turnstileToken?: string) => Promise<boolean>;
   onRevertSubstitution: (substitution: DeckSubstitution) => void;
   revamping?: boolean;
 }
@@ -38,6 +39,7 @@ export default function DeckResult({
   /** Render the current deck, explanation, and revamp controls. */
   const [changeRequest, setChangeRequest] = useState<string>('');
   const [copied, setCopied] = useState<boolean>(false);
+  const [turnstileToken, setTurnstileToken] = useState<string>('');
 
   const decklistText = useMemo(() => buildDeckText(deck), [deck]);
   const commandZoneSize = deck.secondary_commander ? 2 : 1;
@@ -59,7 +61,11 @@ export default function DeckResult({
     /** Submit the inline revamp request and clear the text field only after success. */
     event.preventDefault();
     if (!changeRequest.trim()) return;
-    const succeeded = await onRevamp(changeRequest.trim());
+    // Only pass a second argument when a token actually exists, so callers/tests that
+    // assert on onRevamp's call args aren't affected when Turnstile isn't configured.
+    const succeeded = turnstileToken
+      ? await onRevamp(changeRequest.trim(), turnstileToken)
+      : await onRevamp(changeRequest.trim());
     if (succeeded) {
       setChangeRequest('');
     }
@@ -152,6 +158,7 @@ export default function DeckResult({
             <button type="button" className="primary" onClick={handleCopy}>
               {copied ? 'Copied!' : 'Copy decklist'}
             </button>
+            <TurnstileWidget onTokenChange={setTurnstileToken} />
           </form>
         </aside>
       </div>

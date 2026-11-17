@@ -1,5 +1,6 @@
 import React, { useEffect, useState } from 'react';
 import CommanderAutocomplete from './CommanderAutocomplete';
+import TurnstileWidget from './TurnstileWidget';
 import { fetchCommanderCompanionOptions } from '../api';
 import type { BracketLevel, BuildDeckPayload, DeckFormMode, ExistingDeckActionPayload } from '../types';
 
@@ -33,6 +34,7 @@ export default function DeckForm({ mode = 'build', onSubmit, loading, initial }:
   const [secondaryCommander, setSecondaryCommander] = useState<string>(initial?.secondary_commander ?? '');
   const [secondaryLabel, setSecondaryLabel] = useState<string>('');
   const [secondaryOptions, setSecondaryOptions] = useState<string[]>([]);
+  const [turnstileToken, setTurnstileToken] = useState<string>('');
 
   useEffect(() => {
     setCommander(initial?.commander ?? '');
@@ -87,6 +89,7 @@ export default function DeckForm({ mode = 'build', onSubmit, loading, initial }:
       prompt: prompt.trim(),
       gamechangers: gamechangersState,
       banned_list: bannedListState,
+      turnstile_token: turnstileToken || undefined,
     };
     if (isExistingMode) {
       //remove the commanders from the decklist if they are present on submit
@@ -167,6 +170,8 @@ export default function DeckForm({ mode = 'build', onSubmit, loading, initial }:
           />
         </label>
       )}
+
+      <TurnstileWidget onTokenChange={setTurnstileToken} />
 
       <button
         type="submit"

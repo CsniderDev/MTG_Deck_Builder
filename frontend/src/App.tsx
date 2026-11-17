@@ -236,7 +236,7 @@ export default function App(): React.ReactElement {
     await handleBuild(values);
   }
 
-  async function handleRevamp(changeRequest: string): Promise<boolean> {
+  async function handleRevamp(changeRequest: string, turnstileToken?: string): Promise<boolean> {
     /** Revamp the currently displayed deck into the next numbered version. */
     if (!newDeck || !session) return false;
     setRevamping(true);
@@ -251,6 +251,7 @@ export default function App(): React.ReactElement {
         prompt: session.values.prompt,
         gamechangers,
         banned_list: bannedList,
+        turnstile_token: turnstileToken,
         previous_version: newDeck.version,
         previous_decklist: toCompactDecklistPayload(newDeck.decklist),
         change_request: changeRequest,
@@ -280,12 +281,13 @@ export default function App(): React.ReactElement {
       <header className="app__header">
         <h1>MTG Commander Deck Forge</h1>
         <p className="muted">
-          Powered by Scryfall and EDHREC{health?.llm_enabled ? ', with Gemini guidance' : ''}.
+          Powered by Scryfall and EDHREC
+          {health?.llm_enabled ? `, with ${health.llm_provider || 'LLM'} guidance` : ''}.
         </p>
         {health && !health.llm_enabled && (
           <p className="warning">
-            No Gemini API key configured - decks will be built heuristically. Set GEMINI_API_KEY
-            in backend/.env for LLM-guided builds.
+            No LLM API key configured - decks will be built heuristically. Set GEMINI_API_KEY
+            (or LLM_PROVIDER=openai and OPENAI_API_KEY) in backend/.env for LLM-guided builds.
           </p>
         )}
       </header>

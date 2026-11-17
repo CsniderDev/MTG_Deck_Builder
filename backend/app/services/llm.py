@@ -1,9 +1,10 @@
-"""Gemini wrapper that returns structured deck JSON.
+"""LLM wrapper that returns structured deck JSON.
 
-Uses the modern ``google-genai`` SDK (``from google import genai``). If no API
-key is configured we simply return ``None`` from the public methods so the
-deck builder can fall back to a heuristic. This keeps the app usable without
-any LLM credentials.
+The actual vendor call (Gemini or OpenAI/ChatGPT, chosen by ``LLM_PROVIDER``) lives
+in ``llm_providers``; this module owns the prompts, retries, JSON parsing, the
+daily call budget and the circuit breaker. If no API key is configured we simply
+return ``None`` from the public methods so the deck builder can fall back to a
+heuristic. This keeps the app usable without any LLM credentials.
 """
 from __future__ import annotations
 
@@ -11,13 +12,13 @@ import asyncio
 import json
 import logging
 import re
+import time
+from datetime import date, datetime, timezone
 from typing import Any, Iterable, Optional
 
-from google import genai
-from google.genai import errors as genai_errors
-from google.genai import types as genai_types
-
+import httpx
 from ..config import get_settings
+from .llm_providers import LLMEmptyResponseError, LLMProvider, create_provider
 
 logger = logging.getLogger(__name__)
 
@@ -106,7 +107,7 @@ def _gamechanger_block(
 
 
 def _compact_decklist_for_prompt(previous_decklist: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    """Reduce a hydrated decklist to the minimal fields Gemini needs for revisions."""
+    """Reduce a hydrated decklist to the minimal fields the LLM needs for revisions."""
     compact_cards: list[dict[str, Any]] = []
     for card in previous_decklist:
         if not isinstance(card, dict):
@@ -125,33 +126,127 @@ def _compact_decklist_for_prompt(previous_decklist: list[dict[str, Any]]) -> lis
     return compact_cards
 
 
-def _is_retryable_gemini_error(exc: Exception) -> bool:
-    """Return True for transient Gemini availability failures worth retrying once or twice."""
-    if isinstance(exc, genai_errors.ServerError):
-        status = getattr(exc, "status_code", None)
-        if status in {429, 500, 503, 504}:
-            return True
-    message = str(exc).upper()
-    return any(token in message for token in ("503", "UNAVAILABLE", "RESOURCE_EXHAUSTED", "429"))
-
-
 class LLMService:
     def __init__(self) -> None:
-        """Initialize the Gemini client when an API key is configured."""
+        """Initialize the configured LLM provider when its API key is set."""
         settings = get_settings()
-        self._enabled = bool(settings.gemini_api_key)
-        self._model_name = settings.gemini_model
-        if self._enabled:
-            self._client: Optional[genai.Client] = genai.Client(api_key=settings.gemini_api_key)
-            logger.info("LLMService initialized with model=%s", self._model_name)
-        else:
-            self._client = None
-            logger.info("LLMService disabled: GEMINI_API_KEY is not set")
+        self._provider: Optional[LLMProvider] = create_provider(settings)
+        if self._provider is not None:
+            logger.info(
+                "LLMService initialized with provider=%s model=%s",
+                self._provider.name,
+                self._provider.model,
+            )
+
+        # --- Daily call budget: a hard ceiling on real LLM calls per UTC day. ---
+        self._daily_call_limit = settings.llm_daily_call_limit
+        self._call_count = 0
+        self._call_count_date = self._today()
+        self._alert_webhook_url = settings.alert_webhook_url
+        self._alerted_thresholds: set[int] = set()
+
+        # --- Circuit breaker: stop hammering the LLM after repeated failures. ---
+        self._circuit_failure_threshold = settings.llm_circuit_failure_threshold
+        self._circuit_cooldown_seconds = settings.llm_circuit_cooldown_seconds
+        self._consecutive_failures = 0
+        self._circuit_open_until = 0.0
 
     @property
     def enabled(self) -> bool:
-        """Report whether Gemini-backed deck generation is currently available."""
-        return self._enabled
+        """Report whether LLM-backed deck generation is currently available."""
+        return self._provider is not None
+
+    @property
+    def provider_name(self) -> Optional[str]:
+        """Report the active provider id ("gemini"/"openai"), or None when disabled."""
+        return self._provider.name if self._provider else None
+
+    @property
+    def provider_label(self) -> Optional[str]:
+        """Report a human-friendly provider name ("Gemini"/"ChatGPT"), or None when disabled."""
+        return self._provider.label if self._provider else None
+
+    @property
+    def calls_today(self) -> int:
+        """Report how many real LLM calls have been made so far in the current UTC day."""
+        if self._today() != self._call_count_date:
+            return 0
+        return self._call_count
+
+    @property
+    def daily_call_limit(self) -> int:
+        """Report the configured daily LLM call ceiling."""
+        return self._daily_call_limit
+
+    @staticmethod
+    def _today() -> date:
+        return datetime.now(timezone.utc).date()
+
+    def _check_and_increment_budget(self) -> bool:
+        """Consume one unit of the daily LLM call budget; return False once exhausted."""
+        today = self._today()
+        if today != self._call_count_date:
+            self._call_count_date = today
+            self._call_count = 0
+            self._alerted_thresholds.clear()
+        if self._call_count >= self._daily_call_limit:
+            return False
+        self._call_count += 1
+        self._maybe_alert_budget_threshold()
+        return True
+
+    def _maybe_alert_budget_threshold(self) -> None:
+        """Fire an optional webhook the first time usage crosses 80% and 100% of budget."""
+        ratio = self._call_count / self._daily_call_limit if self._daily_call_limit else 0
+        for threshold in (100, 80):
+            if ratio * 100 >= threshold and threshold not in self._alerted_thresholds:
+                self._alerted_thresholds.add(threshold)
+                logger.warning(
+                    "Daily LLM call budget at %d%% (%d/%d calls today).",
+                    threshold,
+                    self._call_count,
+                    self._daily_call_limit,
+                )
+                self._send_alert_webhook(
+                    f"Daily LLM call budget at {threshold}% "
+                    f"({self._call_count}/{self._daily_call_limit} calls today)."
+                )
+                break
+
+    def _send_alert_webhook(self, message: str) -> None:
+        """Best-effort, non-blocking notification to an optional Slack-style webhook."""
+        if not self._alert_webhook_url:
+            return
+        try:
+            asyncio.get_running_loop().create_task(self._post_alert_webhook(message))
+        except RuntimeError:
+            logger.debug("No running event loop; skipping alert webhook.")
+
+    async def _post_alert_webhook(self, message: str) -> None:
+        try:
+            async with httpx.AsyncClient(timeout=5.0) as client:
+                await client.post(self._alert_webhook_url, json={"text": message})
+        except Exception as exc:  # noqa: BLE001 - alerting must never break the request path
+            logger.warning("Failed to deliver alert webhook: %s", exc)
+
+    def _circuit_open(self) -> bool:
+        """Report whether the circuit breaker is currently open (skipping LLM calls)."""
+        return time.monotonic() < self._circuit_open_until
+
+    def _record_llm_failure(self) -> None:
+        """Track a failed LLM call and open the circuit breaker after repeated failures."""
+        self._consecutive_failures += 1
+        if self._consecutive_failures >= self._circuit_failure_threshold:
+            self._circuit_open_until = time.monotonic() + self._circuit_cooldown_seconds
+            logger.error(
+                "LLM calls failed %d times in a row; opening circuit breaker for %.0fs.",
+                self._consecutive_failures,
+                self._circuit_cooldown_seconds,
+            )
+
+    def _record_llm_success(self) -> None:
+        """Reset the circuit breaker's failure count after a successful LLM call."""
+        self._consecutive_failures = 0
 
     async def build_deck(
         self,
@@ -164,8 +259,8 @@ class LLMService:
         gamechangers: Optional[Iterable[str]] = None,
         banned_list: Optional[Iterable[str]] = None,
     ) -> Optional[dict[str, Any]]:
-        """Ask Gemini to build a new commander deck from a commander and concept prompt."""
-        if not self._enabled or self._client is None:
+        """Ask the LLM to build a new commander deck from a commander and concept prompt."""
+        if self._provider is None:
             return None
         prompt = self._build_prompt(
             commander,
@@ -191,8 +286,8 @@ class LLMService:
         gamechangers: Optional[Iterable[str]] = None,
         banned_list: Optional[Iterable[str]] = None,
     ) -> Optional[dict[str, Any]]:
-        """Ask Gemini to revise an existing decklist and explain each substitution."""
-        if not self._enabled or self._client is None:
+        """Ask the LLM to revise an existing decklist and explain each substitution."""
+        if self._provider is None:
             return None
         gc_block = _gamechanger_block(gamechanger_limit, gamechangers)
         compact_previous_decklist = _compact_decklist_for_prompt(previous_decklist)
@@ -230,7 +325,7 @@ class LLMService:
         gamechangers: Optional[Iterable[str]] = None,
         banned_list: Optional[Iterable[str]] = None,
     ) -> str:
-        """Construct the build-from-scratch prompt sent to Gemini."""
+        """Construct the build-from-scratch prompt sent to the LLM."""
         ci = "".join(commander.get("color_identity") or []) or "C"
         rec_lines: list[str] = []
         for header, cards in recommendations.items():
@@ -274,57 +369,66 @@ class LLMService:
         )
 
     async def _generate_json(self, prompt: str) -> Optional[dict[str, Any]]:
-        """Send a prompt to Gemini and parse the JSON-mode response."""
-        if self._client is None:
+        """Send a prompt to the configured provider and parse the JSON-mode response."""
+        provider = self._provider
+        if provider is None:
+            return None
+        if self._circuit_open():
+            logger.warning(
+                "%s circuit breaker is open after repeated failures; skipping request "
+                "and falling back to the heuristic path.",
+                provider.label,
+            )
+            return None
+        if not self._check_and_increment_budget():
+            logger.warning(
+                "Daily LLM call budget (%d) exhausted; skipping request and falling back "
+                "to the heuristic path.",
+                self._daily_call_limit,
+            )
             return None
         logger.info(
-            "Gemini request: model=%s prompt_chars=%d", self._model_name, len(prompt)
+            "%s request: model=%s prompt_chars=%d", provider.label, provider.model, len(prompt)
         )
-        response = None
+        text: Optional[str] = None
         retry_delays = [0.0, 0.75, 1.5]
         for attempt, delay in enumerate(retry_delays, start=1):
             if delay:
                 await asyncio.sleep(delay)
             try:
-                response = await self._client.aio.models.generate_content(
-                    model=self._model_name,
-                    contents=prompt,
-                    config=genai_types.GenerateContentConfig(
-                        response_mime_type="application/json",
-                    ),
-                )
+                text = await provider.generate_json_text(prompt)
                 break
+            except LLMEmptyResponseError as exc:
+                logger.error("%s returned empty text. %s", provider.label, exc)
+                self._record_llm_failure()
+                return None
             except Exception as exc:  # noqa: BLE001 - propagate as None, log details
-                if _is_retryable_gemini_error(exc) and attempt < len(retry_delays):
+                if provider.is_retryable(exc) and attempt < len(retry_delays):
                     logger.warning(
-                        "Gemini request attempt %d/%d failed with a retryable error: %s",
+                        "%s request attempt %d/%d failed with a retryable error: %s",
+                        provider.label,
                         attempt,
                         len(retry_delays),
                         exc,
                     )
                     continue
-                logger.exception("Gemini request raised: %s", exc)
+                logger.exception("%s request raised: %s", provider.label, exc)
+                self._record_llm_failure()
                 return None
-        if response is None:
+        if text is None:
+            self._record_llm_failure()
             return None
-        text = (getattr(response, "text", "") or "").strip()
-        if not text:
-            feedback = getattr(response, "prompt_feedback", None)
-            candidates = getattr(response, "candidates", None) or []
-            finish = getattr(candidates[0], "finish_reason", None) if candidates else None
-            logger.error(
-                "Gemini returned empty text. finish_reason=%s prompt_feedback=%s",
-                finish,
-                feedback,
-            )
-            return None
-        logger.info("Gemini response: %d chars", len(text))
+        logger.info("%s response: %d chars", provider.label, len(text))
         parsed = self._extract_json(text)
         if parsed is None:
             logger.error(
-                "Gemini output was non-empty but JSON parsing failed. First 500 chars: %s",
+                "%s output was non-empty but JSON parsing failed. First 500 chars: %s",
+                provider.label,
                 text[:500],
             )
+            self._record_llm_failure()
+        else:
+            self._record_llm_success()
         return parsed
 
     @staticmethod

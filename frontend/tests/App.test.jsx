@@ -54,18 +54,18 @@ describe('App', () => {
       ]),
     );
     render(<App />);
-    expect(await screen.findByText(/no gemini api key configured/i)).toBeInTheDocument();
+    expect(await screen.findByText(/no llm api key configured/i)).toBeInTheDocument();
   });
 
-  it('hides the LLM warning when Gemini is configured', async () => {
+  it('hides the LLM warning when an LLM is configured', async () => {
     vi.spyOn(globalThis, 'fetch').mockImplementation(
       routedFetch([
-        ['/api/health', jsonResponse({ status: 'ok', llm_enabled: true })],
+        ['/api/health', jsonResponse({ status: 'ok', llm_enabled: true, llm_provider: 'Gemini' })],
       ]),
     );
     render(<App />);
     await waitFor(() => {
-      expect(screen.queryByText(/no gemini api key configured/i)).not.toBeInTheDocument();
+      expect(screen.queryByText(/no llm api key configured/i)).not.toBeInTheDocument();
     });
     expect(screen.getByText(/with gemini guidance/i)).toBeInTheDocument();
   });
@@ -73,7 +73,7 @@ describe('App', () => {
   it('builds a deck and then revamps it, incrementing the version', async () => {
     const fetchSpy = vi.spyOn(globalThis, 'fetch').mockImplementation(
       routedFetch([
-        ['/api/health', jsonResponse({ status: 'ok', llm_enabled: true })],
+        ['/api/health', jsonResponse({ status: 'ok', llm_enabled: true, llm_provider: 'Gemini' })],
         ['/api/decks/build', () => jsonResponse(makeDeckPayload(1))],
         ['/api/decks/revamp', () => jsonResponse(makeDeckPayload(2, 'Atraxa, Praetors\' Voice'))],
         [/\/api\/cards\/autocomplete/, jsonResponse({ suggestions: [] })],

@@ -60,8 +60,9 @@ class BuildDeckRequest(BaseModel):
     secondary_commander: Optional[str] = Field(default=None, max_length=200)
     bracket: BracketLevel
     prompt: str = Field(default="", max_length=4000)
-    gamechangers: list[str] = Field(default_factory=list)
-    banned_list: list[str] = Field(default_factory=list)
+    gamechangers: list[str] = Field(default_factory=list, max_length=500)
+    banned_list: list[str] = Field(default_factory=list, max_length=500)
+    turnstile_token: Optional[str] = Field(default=None, max_length=4000)
 
 
 class RevampDeckRequest(BaseModel):
@@ -69,11 +70,12 @@ class RevampDeckRequest(BaseModel):
     secondary_commander: Optional[str] = Field(default=None, max_length=200)
     bracket: BracketLevel
     prompt: str = ""
-    gamechangers: list[str] = Field(default_factory=list)
-    banned_list: list[str] = Field(default_factory=list)
+    gamechangers: list[str] = Field(default_factory=list, max_length=500)
+    banned_list: list[str] = Field(default_factory=list, max_length=500)
     previous_version: int = 1
-    previous_decklist: list[MagicCard]
+    previous_decklist: list[MagicCard] = Field(..., max_length=300)
     change_request: str = Field(..., min_length=1, max_length=4000)
+    turnstile_token: Optional[str] = Field(default=None, max_length=4000)
 
 
 class DeckResponse(BaseModel):

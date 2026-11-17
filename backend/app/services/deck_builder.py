@@ -7,11 +7,15 @@ by category and pads the mana base with basic lands.
 """
 from __future__ import annotations
 from collections import Counter
+import hashlib
+import json
 import re
+import time
 
 import logging
 from typing import Any, Optional
 
+from ..config import get_settings
 from ..constants import GAMECHANGERS, gamechanger_limit
 from ..models.schemas import (
     BRACKET_DESCRIPTIONS,
@@ -50,9 +54,66 @@ class DeckBuilder:
         self._scryfall = scryfall
         self._edhrec = edhrec
         self._llm = llm
+        self._response_cache: dict[str, tuple[float, DeckResponse]] = {}
+        self._response_cache_ttl = get_settings().response_cache_ttl_seconds
+
+    def _cache_get(self, key: str) -> Optional[DeckResponse]:
+        """Return a cached response for an identical prior request, if still fresh."""
+        entry = self._response_cache.get(key)
+        if entry is None:
+            return None
+        cached_at, response = entry
+        if time.monotonic() - cached_at > self._response_cache_ttl:
+            del self._response_cache[key]
+            return None
+        return response
+
+    def _cache_set(self, key: str, response: DeckResponse) -> None:
+        """Store a response for a short time so identical repeat requests are free."""
+        if len(self._response_cache) > 500:
+            self._response_cache.clear()
+        self._response_cache[key] = (time.monotonic(), response)
+
+    @staticmethod
+    def _build_cache_key(request: BuildDeckRequest) -> str:
+        """Hash the parts of a build request that fully determine its response."""
+        payload = {
+            "kind": "build",
+            "commander": request.commander.strip().lower(),
+            "secondary_commander": (request.secondary_commander or "").strip().lower(),
+            "bracket": request.bracket,
+            "prompt": (request.prompt or "").strip(),
+            "gamechangers": sorted(name.strip().lower() for name in request.gamechangers or []),
+            "banned_list": sorted(name.strip().lower() for name in request.banned_list or []),
+        }
+        return hashlib.sha256(json.dumps(payload, sort_keys=True).encode()).hexdigest()
+
+    @staticmethod
+    def _revamp_cache_key(request: RevampDeckRequest) -> str:
+        """Hash the parts of a revamp request that fully determine its response."""
+        payload = {
+            "kind": "revamp",
+            "commander": request.commander.strip().lower(),
+            "secondary_commander": (request.secondary_commander or "").strip().lower(),
+            "bracket": request.bracket,
+            "prompt": (request.prompt or "").strip(),
+            "gamechangers": sorted(name.strip().lower() for name in request.gamechangers or []),
+            "banned_list": sorted(name.strip().lower() for name in request.banned_list or []),
+            "previous_version": request.previous_version,
+            "previous_decklist": sorted(
+                (card.name.strip().lower(), int(card.count or 1)) for card in request.previous_decklist
+            ),
+            "change_request": (request.change_request or "").strip(),
+        }
+        return hashlib.sha256(json.dumps(payload, sort_keys=True).encode()).hexdigest()
 
     async def build(self, request: BuildDeckRequest) -> DeckResponse:
-        """Build a new deck from a commander, optionally using Gemini for card selection."""
+        """Build a new deck from a commander, optionally using an LLM for card selection."""
+        cache_key = self._build_cache_key(request)
+        cached = self._cache_get(cache_key)
+        if cached is not None:
+            return cached
+
         commander_card = await self._resolve_commander(request.commander)
         secondary_commander_card = await self._resolve_secondary_commander(
             commander_card,
@@ -71,8 +132,9 @@ class DeckBuilder:
         if has_prompt:
             if not self._llm.enabled:
                 raise DeckBuilderError(
-                    "A deck concept was provided but no Gemini API key is configured. "
-                    "Set GEMINI_API_KEY in backend/.env to enable LLM-driven builds, "
+                    "A deck concept was provided but no LLM API key is configured. "
+                    "Set GEMINI_API_KEY (or LLM_PROVIDER=openai with OPENAI_API_KEY) in "
+                    "backend/.env to enable LLM-driven builds, "
                     "or clear the deck concept to use a heuristic build instead."
                 )
             logger.info(
@@ -98,7 +160,7 @@ class DeckBuilder:
                     request.bracket,
                 )
                 raise DeckBuilderError(
-                    "Gemini failed to produce a valid deck. Check backend logs and "
+                    f"{getattr(self._llm, 'provider_label', None) or 'The LLM'} failed to produce a valid deck. Check backend logs and "
                     "retry, or clear the deck concept to use a heuristic build."
                 )
 
@@ -131,7 +193,7 @@ class DeckBuilder:
         )
         decklist = await self._hydrate_cards(decklist, prefetched_cards)
         substitutions = await self._hydrate_substitutions(substitutions, prefetched_cards)
-        return DeckResponse(
+        response = DeckResponse(
             version=1,
             commander=_to_card(commander_card),
             secondary_commander=_to_card(secondary_commander_card) if secondary_commander_card else None,
@@ -144,7 +206,9 @@ class DeckBuilder:
             substitutions=substitutions,
             source=source,
         )
-    
+        self._cache_set(cache_key, response)
+        return response
+
 
     async def validate_decklist(self, llm_generated_list, commander_colors):
         """Validate LLM-proposed cards for Commander legality and color identity."""
@@ -191,6 +255,11 @@ class DeckBuilder:
 
     async def revamp(self, request: RevampDeckRequest) -> DeckResponse:
         """Revise an existing decklist and return the next version of the deck."""
+        cache_key = self._revamp_cache_key(request)
+        cached = self._cache_get(cache_key)
+        if cached is not None:
+            return cached
+
         commander_card = await self._resolve_commander(request.commander)
         secondary_commander_card = await self._resolve_secondary_commander(
             commander_card,
@@ -250,7 +319,7 @@ class DeckBuilder:
             else request.previous_version
         )
 
-        return DeckResponse(
+        response = DeckResponse(
             version=next_version,
             commander=_to_card(commander_card),
             secondary_commander=_to_card(secondary_commander_card) if secondary_commander_card else None,
@@ -263,6 +332,8 @@ class DeckBuilder:
             substitutions=substitutions,
             source=source,
         )
+        self._cache_set(cache_key, response)
+        return response
 
     async def _resolve_commander(self, name: str) -> dict[str, Any]:
         """Resolve a commander name through Scryfall and surface user-safe errors."""
@@ -751,8 +822,8 @@ def _heuristic_explanation(
     return (
         f"This is a heuristic build for {name}. It seeds the deck with the most-played "
         f"EDHREC cards across categories ({categories}) and pads the mana base with "
-        f"basic lands matching the commander's color identity. Configure a Gemini API "
-        f"key to enable LLM-guided card selection and explanations."
+        f"basic lands matching the commander's color identity. Configure an LLM API "
+        f"key (Gemini or OpenAI) to enable LLM-guided card selection and explanations."
     )
 
 

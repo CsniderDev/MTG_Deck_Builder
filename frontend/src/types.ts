@@ -37,6 +37,7 @@ export interface BuildDeckPayload {
   prompt: string;
   gamechangers: string[];
   banned_list: string[];
+  turnstile_token?: string;
 }
 
 export interface ExistingDeckActionPayload extends BuildDeckPayload {
@@ -52,6 +53,8 @@ export interface RevampDeckPayload extends BuildDeckPayload {
 export interface HealthStatus {
   status: string;
   llm_enabled: boolean;
+  /** Human-friendly name of the active LLM ("Gemini", "ChatGPT"), or null when disabled. */
+  llm_provider?: string | null;
 }
 
 export interface CommanderCompanionOptionsResponse {

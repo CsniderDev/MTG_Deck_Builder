@@ -6,19 +6,21 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 A web app that builds Magic: The Gathering Commander (EDH) decks from a commander name, an optional secondary
 commander/background, a bracket (power level 1-5), and an optional natural-language deck concept. A FastAPI
-backend combines Scryfall (card data/legality/prices), EDHREC (community synergy data), and Google Gemini
-(LLM-guided card selection) behind a React + TypeScript (Vite) frontend.
+backend combines Scryfall (card data/legality/prices), EDHREC (community synergy data), and an LLM — Google Gemini or
+OpenAI/ChatGPT, chosen by `LLM_PROVIDER` — (LLM-guided card selection) behind a React + TypeScript (Vite) frontend.
 
-- **Backend**: Python 3.11+, FastAPI, httpx, pydantic v2, `google-genai` (`from google import genai`).
+- **Backend**: Python 3.11+, FastAPI, httpx, pydantic v2, `google-genai` and `openai` SDKs.
 - **Frontend**: React 18 + TypeScript, Vite, Vitest, Recharts (mana pie charts).
 - **External APIs**: Scryfall (`https://api.scryfall.com`), EDHREC JSON (`https://json.edhrec.com`), Google
-  Gemini (`gemini-2.5-flash` by default).
+  Gemini (`gemini-2.5-flash` by default) or OpenAI (`gpt-4.1-mini` by default) — see "LLM providers" below.
 
 `README.md` documents the original single-commander build/revamp flow in detail (API shapes, bracket table,
 per-file reference) and is still broadly accurate, but the code has since grown partner/background commanders,
-a live banned-list/game-changers fetch, an "existing decklist" revamp workflow, and LLM substitution tracking —
-none of which are in the README yet. Treat the README as a good primer and this file plus the source as the
-source of truth for anything that conflicts.
+a live banned-list/game-changers fetch, an "existing decklist" revamp workflow, LLM substitution tracking, and
+(most recently) a layer of abuse/cost protection — none of which are in the README yet. Treat the README as a
+good primer and this file plus the source as the source of truth for anything that conflicts. See `SECURITY.md`
+for the full rundown of the protections below plus the manual deployment steps they don't cover (Cloudflare,
+Gemini budget alerts, HTTPS).
 
 ## Commands
 
@@ -42,10 +44,11 @@ backend\.venv\Scripts\python.exe -m pytest tests/test_llm.py::test_name -q      
 ```
 
 `pytest.ini` sets `asyncio_mode = auto`, so async tests need no extra markers. `tests/conftest.py` clears any
-leaked `GEMINI_API_KEY` so the LLM is disabled by default in tests; external HTTP is mocked with `respx`
+leaked `GEMINI_API_KEY`/`OPENAI_API_KEY` so the LLM is disabled by default in tests; external HTTP is mocked with `respx`
 (backend) — no network is touched during tests.
 
-Requires an optional `backend/.env` with `GEMINI_API_KEY=...` for LLM-guided builds; without it, prompt-driven
+Requires an optional `backend/.env` with `GEMINI_API_KEY=...` (or `LLM_PROVIDER=openai` +
+`OPENAI_API_KEY=...`) for LLM-guided builds; without it, prompt-driven
 builds return HTTP 400 and prompt-less builds fall back to the heuristic.
 
 ### Frontend (run from `frontend/`)
@@ -84,9 +87,9 @@ React + TS (Vite, 5173)              FastAPI (uvicorn, 8000)
   api.ts -- fetch /api/*              DeckBuilder service
                                          +- ScryfallClient
                                          +- EDHRecClient
-                                         +- LLMService (Gemini)
+                                         +- LLMService -> provider (Gemini | OpenAI)
                      |
-        Scryfall API | EDHREC JSON | Gemini API
+        Scryfall API | EDHREC JSON | Gemini / OpenAI API
 ```
 
 ### Two build entry points
@@ -146,6 +149,41 @@ card art and a "Revert this swap" button. Reverting is purely client-side: `App.
 `previousLibraryForCurrentDeck`, decrementing/removing added ones) without another network call — it does not
 ask the LLM to redo anything, so it can drift from what the server would produce if asked to revamp again.
 
+### LLM providers
+
+`LLMService` (`backend/app/services/llm.py`) owns the prompts, retries, JSON extraction, daily call budget and
+circuit breaker; the vendor call itself is delegated to an adapter in `backend/app/services/llm_providers.py`
+(`GeminiProvider` / `OpenAIProvider`, built by `create_provider` from `LLM_PROVIDER`). An adapter only has to
+implement `generate_json_text(prompt)` (JSON mode, raise `LLMEmptyResponseError` on an empty reply) and
+`is_retryable(exc)`. If the selected provider has no API key — or `LLM_PROVIDER` is unrecognised — the
+service is disabled and the app behaves exactly as it does with no key. Adding another vendor means one new
+adapter class plus a branch in `create_provider`. `GET /api/health` reports the active `llm_provider` label,
+which the frontend header displays.
+
+### Abuse / cost protection layer
+
+`backend/app/main.py` wraps `build_deck`/`revamp_deck` in two independent layers of defense against
+someone scripting requests against the Gemini-calling endpoints (full detail in `SECURITY.md`):
+
+- **Per-IP rate limiting** via `slowapi` — a `Limiter` on `app.state.limiter` with a global
+  `60/minute` default, plus `5/minute` and `{settings.daily_ip_limit}/day` (default 50) specifically on
+  build/revamp. Both route functions take a `request: Request` parameter (required by `slowapi`'s
+  decorator) alongside the pydantic body, which is now named `payload` rather than `request` to avoid
+  the name clash.
+- **A shared daily LLM call budget and circuit breaker**, both live inside `LLMService`
+  (`_check_and_increment_budget`, `_circuit_open`) and gate every real call in `_generate_json` — once
+  either trips, `_generate_json` returns `None` without hitting the network, and the deck builder falls
+  back to the heuristic path exactly as it does when the LLM is simply disabled. `GET /api/health` exposes
+  `llm_calls_today`/`llm_daily_call_limit` so usage is visible without reading logs.
+
+`DeckBuilder` also caches full `build()`/`revamp()` responses for `settings.response_cache_ttl_seconds`
+(default 120s) keyed by a hash of the request's meaningful fields (`_build_cache_key`/`_revamp_cache_key`),
+so identical repeat requests — double-clicks, naive retry scripts — don't re-hit Gemini/Scryfall/EDHREC at
+all. `BuildDeckRequest`/`RevampDeckRequest` also carry an optional `turnstile_token` field; when
+`TURNSTILE_SECRET_KEY` is set, both routes verify it against Cloudflare's siteverify endpoint before doing
+any work, and reject with 400 if it's missing/invalid. All of this is off by default (rate limiting aside)
+and safe for local dev — nothing here requires configuration to keep working.
+
 ### Card hydration
 
 Deck cards start as bare `{name, count, category}` from the LLM/heuristic. `DeckBuilder._hydrate_cards` fills
@@ -173,5 +211,9 @@ sync when the API contract changes.
 - The banned-list/game-changers Scryfall caches live on the `ScryfallClient` instance, which is constructed
   once in `main.py`'s `lifespan` and shared for the process lifetime — restart the backend to pick up changes
   to either list.
+- `main.py`'s `limiter` is a module-level singleton, so its rate-limit storage persists across requests within
+  one process (as intended) but also across `TestClient` instances within one pytest run. `tests/test_api.py`'s
+  `client` fixture calls `main_module.limiter.reset()` before each test for this reason — keep that if you add
+  more API tests that hit `build`/`revamp` repeatedly.
 - See `TODO.md` for known gaps (e.g., revamp not yet persisting the true previous decklist across turns, mana
-  base heuristic still being refined, no request throttling on the LLM-facing endpoints yet).
+  base heuristic still being refined).

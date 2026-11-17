@@ -12,4 +12,6 @@ if str(ROOT) not in sys.path:
 
 # Make sure no leaked .env from the dev machine activates the LLM during tests.
 os.environ.setdefault("GEMINI_API_KEY", "")
+os.environ.setdefault("OPENAI_API_KEY", "")
+os.environ.setdefault("LLM_PROVIDER", "gemini")
 os.environ.setdefault("FRONTEND_ORIGIN", "http://localhost:5173")

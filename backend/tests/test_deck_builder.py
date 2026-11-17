@@ -357,7 +357,7 @@ async def test_revamp_with_unchanged_llm_deck_does_not_increment_version():
 @pytest.mark.asyncio
 async def test_build_rejects_prompt_when_llm_disabled():
     builder = DeckBuilder(_StubScryfall(), _StubEDHRec(), _StubLLM(payload=None, enabled=False))
-    with pytest.raises(DeckBuilderError, match="Gemini"):
+    with pytest.raises(DeckBuilderError, match="no LLM API key"):
         await builder.build(BuildDeckRequest(commander="Atraxa", bracket=3, prompt="combo"))
 
 

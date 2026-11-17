@@ -1,0 +1,28 @@
+# Render blueprint for the FastAPI backend (free tier).
+# In Render: New -> Blueprint -> pick this repo. You'll be prompted for the
+# values marked `sync: false` (they are never stored in git).
+services:
+  - type: web
+    name: mtg-deck-builder-api
+    runtime: python
+    plan: free
+    rootDir: backend
+    buildCommand: pip install -r requirements.txt
+    startCommand: uvicorn app.main:app --host 0.0.0.0 --port $PORT
+    healthCheckPath: /api/health
+    envVars:
+      - key: PYTHON_VERSION
+        value: 3.12.8
+      # "gemini" (free tier) or "openai" (ChatGPT, paid API). Set the matching key;
+      # leave the other one blank.
+      - key: LLM_PROVIDER
+        value: gemini
+      - key: GEMINI_API_KEY
+        sync: false
+      - key: OPENAI_API_KEY
+        sync: false
+      # The GitHub Pages origin (no path). Add more comma-separated if needed.
+      - key: FRONTEND_ORIGIN
+        value: https://csniderdev.github.io
+      - key: LLM_DAILY_CALL_LIMIT
+        value: "100"

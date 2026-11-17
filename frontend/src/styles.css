@@ -100,6 +100,8 @@ button:disabled { opacity: 0.55; cursor: not-allowed; }
 button.primary { background: var(--accent); color: #0a0c12; }
 button.secondary { background: var(--accent-2); color: #0a0c12; }
 
+.turnstile-widget { margin-top: 4px; }
+
 .deck-result {
   background: var(--panel);
   border: 1px solid var(--border);

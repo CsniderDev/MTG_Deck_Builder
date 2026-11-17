@@ -9,9 +9,18 @@ import type {
   RevampDeckPayload,
 } from './types';
 
+// Base URL of the FastAPI backend. Empty in local dev (Vite proxies /api to localhost:8000);
+// set VITE_API_BASE_URL at build time when the frontend is hosted separately (e.g. GitHub Pages).
+const API_BASE = ((import.meta.env.VITE_API_BASE_URL as string | undefined) || '').replace(/\/+$/, '');
+
+function apiUrl(path: string): string {
+  /** Prefix an /api path with the configured backend origin. */
+  return `${API_BASE}${path}`;
+}
+
 async function postJson<T>(path: string, body: unknown): Promise<T> {
   /** Post JSON to the backend and parse the typed JSON response. */
-  const response = await fetch(path, {
+  const response = await fetch(apiUrl(path), {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(body),
@@ -34,8 +43,8 @@ export function revampDeck(payload: RevampDeckPayload): Promise<DeckResponse> {
 }
 
 export async function fetchHealth(): Promise<HealthStatus> {
-  /** Check whether the backend is reachable and whether Gemini is enabled. */
-  const response = await fetch('/api/health');
+  /** Check whether the backend is reachable and which LLM (if any) is enabled. */
+  const response = await fetch(apiUrl('/api/health'));
   if (!response.ok) throw new Error('Health check failed');
   return (await response.json()) as HealthStatus;
 }
@@ -51,7 +60,7 @@ export async function fetchBannedListAndGamechangers(): Promise<{ banned_list: s
 
 export async function fetchBannedList(): Promise<string[]> {
   /** Fetch the current Commander banned list from the backend. */
-  const response = await fetch('/api/banned');
+  const response = await fetch(apiUrl('/api/banned'));
   if (!response.ok) throw new Error('Failed to fetch banned list');
   const data = (await response.json()) as BannedListResponse;
   console.log('Fetched banned list:', data);
@@ -60,7 +69,7 @@ export async function fetchBannedList(): Promise<string[]> {
 
 export async function fetchGamechangers(): Promise<string[]> {
   /** Fetch the current Commander game-changer list from the backend. */
-  const response = await fetch('/api/gamechangers');
+  const response = await fetch(apiUrl('/api/gamechangers'));
   if (!response.ok) throw new Error('Failed to fetch gamechangers');
   const data = (await response.json()) as GamechangersResponse;
   console.log('Fetched gamechangers:', data);
@@ -78,7 +87,7 @@ export async function autocompleteCommanders(
 ): Promise<string[]> {
   /** Fetch commander-name suggestions for the autocomplete input. */
   const params = new URLSearchParams({ q: query, commander_only: String(commanderOnly) });
-  const response = await fetch(`/api/cards/autocomplete?${params.toString()}`, { signal });
+  const response = await fetch(apiUrl(`/api/cards/autocomplete?${params.toString()}`), { signal });
   if (!response.ok) {
     const detail = (await response.json().catch(() => ({}))) as { detail?: string };
     throw new Error(detail.detail || `Autocomplete failed with status ${response.status}`);
@@ -93,7 +102,7 @@ export async function fetchCommanderCompanionOptions(
 ): Promise<CommanderCompanionOptionsResponse> {
   /** Fetch valid secondary commander/background options for a selected commander. */
   const params = new URLSearchParams({ q: commander });
-  const response = await fetch(`/api/cards/commander-options?${params.toString()}`, { signal });
+  const response = await fetch(apiUrl(`/api/cards/commander-options?${params.toString()}`), { signal });
   if (!response.ok) {
     const detail = (await response.json().catch(() => ({}))) as { detail?: string };
     throw new Error(detail.detail || `Commander options failed with status ${response.status}`);

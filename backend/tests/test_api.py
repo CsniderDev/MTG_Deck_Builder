@@ -119,6 +119,9 @@ def client(monkeypatch):
     app.state.builder = builder
     app.state.scryfall = scryfall
     app.state.llm = builder._llm  # type: ignore[attr-defined]
+    # Rate-limit storage is process-wide on the shared `limiter`; reset it so one
+    # test's requests never count against another test's limit.
+    main_module.limiter.reset()
     return TestClient(app)
 
 
@@ -128,6 +131,18 @@ def test_health_endpoint(client):
     body = response.json()
     assert body["status"] == "ok"
     assert body["llm_enabled"] is False
+    assert "llm_calls_today" in body
+    assert "llm_daily_call_limit" in body
+
+
+def test_build_endpoint_rate_limited_after_five_per_minute(client):
+    payload = {"commander": "Atraxa", "bracket": 3, "prompt": ""}
+    for _ in range(5):
+        response = client.post("/api/decks/build", json=payload)
+        assert response.status_code == 200, response.text
+    limited = client.post("/api/decks/build", json=payload)
+    assert limited.status_code == 429
+    assert "rate limit" in limited.json()["detail"].lower()
 
 
 def test_build_endpoint_success(client):
