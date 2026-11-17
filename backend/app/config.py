@@ -13,6 +13,10 @@ class Settings(BaseSettings):
 
     gemini_api_key: str = ""
     gemini_model: str = "gemini-2.5-flash"
+    # Tokens Gemini may spend "thinking" before answering. 0 turns thinking off:
+    # on 2.5 Flash a full build drops from ~60s to ~20s with similar decks. Set -1
+    # for the model's default (some newer models can't disable thinking).
+    gemini_thinking_budget: int = 0
 
     openai_api_key: str = ""
     openai_model: str = "gpt-4.1-mini"

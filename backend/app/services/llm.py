@@ -26,7 +26,7 @@ logger = logging.getLogger(__name__)
 _DECK_SCHEMA_INSTRUCTIONS = """
 Respond ONLY with a single JSON object, no prose, no markdown fences. Schema:
 {
-  "decklist": [{"name": "<exact card name>", "count": <int>, "category": "<short label>", oracle_text: "<card oracle text for reference>"}],
+  "decklist": [{"name": "<exact card name>", "count": <int>, "category": "<short label>"}],
   "explanation": "<2-4 paragraph plain-text explanation of the deck plan>",
   "notes": ["<optional short bullet>", "..."],
   "substitutions": [

@@ -47,11 +47,12 @@ class GeminiProvider:
     name = "gemini"
     label = "Gemini"
 
-    def __init__(self, api_key: str, model: str) -> None:
+    def __init__(self, api_key: str, model: str, thinking_budget: int = -1) -> None:
         from google import genai
         from google.genai import types as genai_types
 
         self.model = model
+        self._thinking_budget = thinking_budget
         # Pin the API version: google-genai 3.x defaults to "v1", which rejects JSON mode
         # ("JSON mode is not enabled for api version v1"). v1beta works on 2.x and 3.x.
         self._client = genai.Client(
@@ -65,7 +66,14 @@ class GeminiProvider:
         response = await self._client.aio.models.generate_content(
             model=self.model,
             contents=prompt,
-            config=genai_types.GenerateContentConfig(response_mime_type="application/json"),
+            config=genai_types.GenerateContentConfig(
+                response_mime_type="application/json",
+                thinking_config=(
+                    genai_types.ThinkingConfig(thinking_budget=self._thinking_budget)
+                    if self._thinking_budget >= 0
+                    else None
+                ),
+            ),
         )
         text = (getattr(response, "text", "") or "").strip()
         if not text:
@@ -136,7 +144,9 @@ def create_provider(settings: Settings) -> Optional[LLMProvider]:
         if not settings.gemini_api_key:
             logger.info("LLM disabled: LLM_PROVIDER=gemini but GEMINI_API_KEY is not set")
             return None
-        return GeminiProvider(settings.gemini_api_key, settings.gemini_model)
+        return GeminiProvider(
+            settings.gemini_api_key, settings.gemini_model, settings.gemini_thinking_budget
+        )
     if provider == "openai":
         if not settings.openai_api_key:
             logger.info("LLM disabled: LLM_PROVIDER=openai but OPENAI_API_KEY is not set")

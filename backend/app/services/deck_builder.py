@@ -187,6 +187,7 @@ class DeckBuilder:
             request.bracket,
             gamechangers,
             secondary_commander_card,
+            prefetched_cards,
         )
         decklist = await self._hydrate_cards(decklist, prefetched_cards)
         substitutions = await self._hydrate_substitutions(substitutions, prefetched_cards)
@@ -311,7 +312,13 @@ class DeckBuilder:
                 llm_result.get("decklist") or [], command_zone.get("color_identity", [])
             )
             decklist, explanation, source, notes, substitutions = self._materialize(
-                llm_result, command_zone, {}, request.bracket, gamechangers, secondary_commander_card
+                llm_result,
+                command_zone,
+                {},
+                request.bracket,
+                gamechangers,
+                secondary_commander_card,
+                prefetched_cards,
             )
         decklist = await self._hydrate_cards(decklist, prefetched_cards)
         substitutions = await self._hydrate_substitutions(substitutions, prefetched_cards)
@@ -419,12 +426,16 @@ class DeckBuilder:
         bracket: int,
         gamechangers: Optional[set[str]] = None,
         secondary_commander_card: Optional[dict[str, Any]] = None,
+        prefetched_cards: Optional[dict[str, dict[str, Any]]] = None,
     ) -> tuple[list[MagicCard], str, str, list[str], list[DeckSubstitution]]:
         """Turn raw LLM or heuristic output into normalized cards plus metadata."""
         notes: list[str] = []
         substitutions: list[DeckSubstitution] = []
         if llm_result and isinstance(llm_result.get("decklist"), list):
-            raw_list = llm_result["decklist"]
+            # The LLM no longer writes oracle text (it was most of its output and slowed
+            # every call); fill it from Scryfall so normalization can still spot
+            # "any number of cards named" cards like Relentless Rats.
+            raw_list = _with_scryfall_text(llm_result["decklist"], prefetched_cards or {})
             explanation = (llm_result.get("explanation") or "").strip() or "(no explanation provided)"
             extra_notes = llm_result.get("notes") or []
             if isinstance(extra_notes, list):
@@ -600,6 +611,22 @@ def _decklist_signature(decklist: list[MagicCard]) -> list[tuple[str, int]]:
         ((card.name.strip().lower(), int(card.count or 1)) for card in decklist if card.name.strip()),
         key=lambda item: (item[0], item[1]),
     )
+
+
+def _with_scryfall_text(
+    raw_list: list[Any], prefetched_cards: dict[str, dict[str, Any]]
+) -> list[Any]:
+    """Copy oracle text / card faces from prefetched Scryfall data onto raw LLM entries."""
+    enriched: list[Any] = []
+    for entry in raw_list:
+        if isinstance(entry, dict) and not entry.get("oracle_text"):
+            data = prefetched_cards.get(str(entry.get("name") or "").strip().lower())
+            if data:
+                entry = {**entry, "oracle_text": data.get("oracle_text") or ""}
+                if data.get("card_faces") and "card_faces" not in entry:
+                    entry["card_faces"] = data["card_faces"]
+        enriched.append(entry)
+    return enriched
 
 
 def _normalize_decklist(
