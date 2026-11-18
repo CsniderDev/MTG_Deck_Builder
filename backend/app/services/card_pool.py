@@ -180,6 +180,46 @@ def sanitize_theme_queries(queries: Any) -> list[str]:
     return cleaned
 
 
+_CONCEPT_STOPWORDS = {
+    "a", "an", "the", "and", "or", "with", "deck", "build", "focus", "focused", "focusing",
+    "on", "of", "for", "my", "to", "that", "in", "around", "using", "use", "uses", "theme",
+    "themed", "strategy", "plan", "lots", "lot", "more", "less", "some", "very", "really",
+    "aggressive", "budget", "fast", "slow", "value", "good", "best", "cards", "card", "want",
+    "i", "is", "it", "be", "make", "lean", "heavy", "bracket", "casual", "competitive", "cedh",
+}
+
+
+def plan_theme_queries(plan: Any) -> list[Any]:
+    """Theme queries from an LLM plan, tolerating the key names models tend to use."""
+    if not isinstance(plan, dict):
+        return []
+    for key in ("theme_queries", "themeQueries", "scryfall_queries", "queries", "searches"):
+        value = plan.get(key)
+        if isinstance(value, list) and value:
+            return value
+    return []
+
+
+def fallback_theme_queries(concept: str) -> list[str]:
+    """Rules-text searches built straight from the user's concept, when the plan gave none.
+
+    "proliferate experience counters" -> ['o:"experience counter"', 'o:proliferate'].
+    Crude, but a theme search that finds nothing is harmless, while no theme search at
+    all silently drops the concept from the card pool.
+    """
+    queries: list[str] = []
+    padded = " " + (concept or "").lower().replace(",", " , ") + " "
+    for phrase in re.split("[,.;&!?]| and | with | plus ", padded):
+        words = [w for w in re.findall(r"[a-z0-9+/'-]+", phrase) if w not in _CONCEPT_STOPWORDS]
+        words = [w[:-1] if len(w) > 4 and w.endswith("s") and not w.endswith("ss") else w for w in words]
+        if not words:
+            continue
+        queries.append(f'o:"{" ".join(words[-2:])}"' if len(words) > 1 else f"o:{words[0]}")
+        if len(words) > 2:
+            queries.append(f"o:{words[0]}")
+    return sanitize_theme_queries(queries)
+
+
 def _identity_filter(identity: Iterable[str]) -> str:
     colors = "".join(c for c in "WUBRG" if c in set(identity)).lower()
     return f"id<={colors or 'c'} f:commander"
@@ -359,6 +399,30 @@ def _needs_oracle_text(card: PoolCard) -> bool:
     return bool({"new", "gem"} & card.tags) or rank is None or rank > 3000
 
 
+def _card_line(card: PoolCard, include_prices: bool = False, numbered: bool = True) -> str:
+    """One compact prompt line: '#12 Name {cost} | type $price [tags] :: rules text'."""
+    cost = card.data.get("mana_cost") or ""
+    if not cost and card.data.get("card_faces"):
+        cost = (card.data["card_faces"][0] or {}).get("mana_cost") or ""
+    tags = sorted(card.tags - {"edhrec"})
+    extra = f" [{', '.join(tags)}]" if tags else ""
+    price = ""
+    if include_prices:
+        usd = (card.data.get("prices") or {}).get("usd")
+        price = f" ${usd}" if usd else ""
+    prefix = f"#{card.id} " if numbered else ""
+    line = f"{prefix}{card.name} {cost} | {card.type_line}{price}{extra}"
+    if _needs_oracle_text(card):
+        text = " ".join((card.data.get("oracle_text") or "").split())
+        if not text and card.data.get("card_faces"):
+            text = " // ".join(
+                " ".join((f.get("oracle_text") or "").split()) for f in card.data["card_faces"]
+            )
+        if text:
+            line += f" :: {text[:160]}"
+    return line
+
+
 def render_pool(pool: CardPool, include_prices: bool = False) -> str:
     """Render the pool as compact numbered lines grouped by category."""
     groups: dict[str, list[PoolCard]] = {}
@@ -370,27 +434,19 @@ def render_pool(pool: CardPool, include_prices: bool = False) -> str:
         if not cards:
             continue
         lines.append(f"## {label}")
-        for card in cards:
-            cost = card.data.get("mana_cost") or ""
-            if not cost and card.data.get("card_faces"):
-                cost = (card.data["card_faces"][0] or {}).get("mana_cost") or ""
-            tags = sorted(card.tags - {"edhrec"})
-            extra = f" [{', '.join(tags)}]" if tags else ""
-            price = ""
-            if include_prices:
-                usd = (card.data.get("prices") or {}).get("usd")
-                price = f" ${usd}" if usd else ""
-            line = f"#{card.id} {card.name} {cost} | {card.type_line}{price}{extra}"
-            if _needs_oracle_text(card):
-                text = " ".join((card.data.get("oracle_text") or "").split())
-                if not text and card.data.get("card_faces"):
-                    text = " // ".join(
-                        " ".join((f.get("oracle_text") or "").split()) for f in card.data["card_faces"]
-                    )
-                if text:
-                    line += f" :: {text[:160]}"
-            lines.append(line)
+        lines.extend(_card_line(card, include_prices) for card in cards)
     return "\n".join(lines)
+
+
+def render_theme_candidates(pool: CardPool, exclude: set[str], limit: int = 60) -> str:
+    """On-theme cards for a revision prompt (by name), skipping cards already in the deck.
+
+    New releases and gems are listed first so they aren't crowded out by staples.
+    """
+    excluded = {name.lower() for name in exclude}
+    cards = [c for c in pool.cards if "theme" in c.roles and not c.is_land and c.key not in excluded]
+    cards.sort(key=lambda c: (bool({"new", "gem"} & c.tags), c.score()), reverse=True)
+    return "\n".join(_card_line(card, numbered=False) for card in cards[:limit])
 
 
 def clamp_targets(raw: Any, deck_size: int) -> dict[str, int]:

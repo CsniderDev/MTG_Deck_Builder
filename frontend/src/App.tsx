@@ -256,6 +256,7 @@ export default function App(): React.ReactElement {
         previous_version: newDeck.version,
         previous_decklist: toCompactDecklistPayload(newDeck.decklist),
         change_request: changeRequest,
+        plan: newDeck.plan ?? undefined,
       };
       const result = await revampDeck(basePayload);
       setNewDeck(result);

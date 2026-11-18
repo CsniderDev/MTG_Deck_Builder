@@ -440,21 +440,49 @@ class LLMService:
         gamechanger_limit: Optional[int] = None,
         gamechangers: Optional[Iterable[str]] = None,
         banned_list: Optional[Iterable[str]] = None,
+        plan_strategy: str = "",
+        theme_candidates: str = "",
     ) -> Optional[dict[str, Any]]:
-        """Ask the LLM to revise an existing decklist and explain each substitution."""
+        """Ask the LLM to revise an existing decklist and explain each substitution.
+
+        The deck's recorded game plan leads the prompt and every change must serve it
+        unless the change request explicitly asks for a different plan.
+        """
         if self._provider is None:
             return None
         gc_block = _gamechanger_block(gamechanger_limit, gamechangers)
         compact_previous_decklist = _compact_decklist_for_prompt(previous_decklist)
-
+        plan_line = plan_strategy.strip() or (
+            "(not recorded - work it out from the commander, the original concept and the "
+            "current list, then keep to it)"
+        )
+        candidates_block = (
+            "On-theme candidates (verified Commander-legal and in the deck's colors; prefer "
+            "these when adding cards for the theme):\n"
+            f"{theme_candidates}\n\n"
+            if theme_candidates
+            else ""
+        )
 
         prompt = (
             f"You are revising an existing Magic: The Gathering Commander deck.\n"
             f"Commander: {commander.get('name')} "
             f"(color identity: {''.join(commander.get('color_identity') or []) or 'C'}).\n"
             f"Bracket {bracket} - {bracket_description}\n"
+            f"CORE GAME PLAN (keep it unless the change request explicitly asks to change it): {plan_line}\n"
             f"Original user concept: {user_prompt or '(none)'}\n"
             f"User change request: {change_request}\n\n"
+            "How to revise:\n"
+            "- Apply the change request IN SERVICE OF the core game plan. Every card you add "
+            "must support that plan or do a job the request asks for in a way that fits it.\n"
+            "- For generic requests (\"more removal\", \"lower the curve\", \"more draw\"), choose "
+            "cards that do the job AND fit the theme where possible, and cut the least "
+            "on-plan cards first. Never swap theme pieces or synergy cards for generic staples "
+            "unless the request asks for that.\n"
+            "- Change only what the request needs; keep everything else.\n"
+            "- Only change the game plan when the request clearly asks for it (e.g. \"switch "
+            "to...\", \"make it a ... deck instead\", \"change the theme/strategy\").\n\n"
+            f"{candidates_block}"
             f"Here is a current list of banned cards. DO NOT include any of these cards at all:\n{json.dumps(list(banned_list or []))}\n\n"
             f"{gc_block}"
             f"Current decklist (99 cards, compact JSON):\n{json.dumps(compact_previous_decklist)}\n\n"
@@ -465,7 +493,12 @@ class LLMService:
             f"cards and alternate printed or reskinned names as valid whenever Scryfall "
             f"resolves them to Commander-legal cards. Prefer official Scryfall card names "
             f"in the final JSON when possible.\n\n"
-            f"{_DECK_SCHEMA_INSTRUCTIONS}"
+            f"{_DECK_SCHEMA_INSTRUCTIONS}\n"
+            "Also include in the JSON object:\n"
+            '  "plan": {"changed": <true only if the change request explicitly changed the game '
+            'plan>, "strategy": "<the deck\'s core game plan after this revision, 1-3 '
+            'sentences>", "theme_queries": ["<only when changed: 2-4 Scryfall queries for the '
+            'new theme, e.g. o:proliferate>"]}'
         )
         return await self._generate_json(prompt)
 

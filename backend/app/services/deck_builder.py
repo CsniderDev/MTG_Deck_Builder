@@ -19,6 +19,7 @@ from typing import Any, Iterable, Optional
 from ..config import get_settings
 from ..constants import GAMECHANGERS, gamechanger_limit
 from ..models.schemas import (
+    DeckPlan,
     BRACKET_DESCRIPTIONS,
     BuildDeckRequest,
     DeckSubstitution,
@@ -34,8 +35,11 @@ from .card_pool import (
     assemble_deck,
     build_card_pool,
     clamp_targets,
+    fallback_theme_queries,
+    plan_theme_queries,
     prefetch_base_searches,
     render_pool,
+    render_theme_candidates,
     sanitize_theme_queries,
 )
 from .llm import LLMService, _budget_block
@@ -114,6 +118,7 @@ class DeckBuilder:
                 (card.name.strip().lower(), int(card.count or 1)) for card in request.previous_decklist
             ),
             "change_request": (request.change_request or "").strip(),
+            "plan": request.plan.model_dump() if request.plan else None,
         }
         return hashlib.sha256(json.dumps(payload, sort_keys=True).encode()).hexdigest()
 
@@ -180,7 +185,11 @@ class DeckBuilder:
         else:
             recommendations = await self._fetch_recommendations(commander_card["name"])
         targets = clamp_targets(plan.get("targets"), deck_size)
-        theme_queries = sanitize_theme_queries(plan.get("theme_queries"))
+        theme_queries = sanitize_theme_queries(plan_theme_queries(plan))
+        if has_prompt and not theme_queries:
+            # Never let a missing/garbled field silently drop the concept from the pool.
+            theme_queries = fallback_theme_queries(request.prompt)
+            logger.warning("Plan had no usable theme queries; derived %s from the concept", theme_queries)
 
         # Step 2: a numbered pool of real, legal, on-color candidates.
         pool = await build_card_pool(
@@ -246,6 +255,11 @@ class DeckBuilder:
             notes=notes,
             substitutions=[],
             source=source,
+            plan=(
+                DeckPlan(strategy=str(plan.get("strategy") or "")[:2000], theme_queries=theme_queries)
+                if has_prompt
+                else None
+            ),
         )
         self._cache_set(cache_key, response)
         return response
@@ -322,6 +336,27 @@ class DeckBuilder:
         prefetched_cards: dict[str, dict[str, Any]] = {}
         llm_failed = False
 
+        # Keep revisions on the deck's game plan: send the recorded strategy, plus real
+        # on-theme candidates from the plan's theme searches so additions fit the deck
+        # instead of drifting toward generic staples.
+        prior_plan = request.plan
+        theme_queries = sanitize_theme_queries(prior_plan.theme_queries) if prior_plan else []
+        theme_candidates = ""
+        if theme_queries:
+            command_cards = [c for c in (commander_card, secondary_commander_card) if c]
+            theme_pool = await build_card_pool(
+                self._scryfall,
+                command_cards,
+                {},
+                theme_queries,
+                banned_list,
+                gamechangers or {name.lower() for name in GAMECHANGERS},
+                limit,
+            )
+            theme_candidates = render_theme_candidates(
+                theme_pool, {card.name for card in request.previous_decklist}
+            )
+
         llm_result = await self._llm.revamp_deck(
             commander=command_zone,
             bracket=request.bracket,
@@ -332,6 +367,8 @@ class DeckBuilder:
             gamechanger_limit=limit,
             gamechangers=gamechangers,
             banned_list=banned_list,
+            plan_strategy=prior_plan.strategy if prior_plan else "",
+            theme_candidates=theme_candidates,
         )
         if llm_result is None:
             llm_failed = True
@@ -414,6 +451,7 @@ class DeckBuilder:
             notes=notes,
             substitutions=substitutions,
             source=source,
+            plan=_next_plan(prior_plan, llm_result, notes),
         )
         self._cache_set(cache_key, response)
         return response
@@ -1302,6 +1340,28 @@ def _heuristic_decklist(
         if len(picks) >= target_nonland:
             break
     return picks
+
+
+def _next_plan(
+    prior: Optional[DeckPlan], llm_result: Optional[dict[str, Any]], notes: list[str]
+) -> Optional[DeckPlan]:
+    """The plan to carry into the next revision.
+
+    The prior plan is kept unless the LLM reports that the change request explicitly
+    changed it. Decks with no recorded plan (imported lists) adopt the one the LLM
+    inferred, so later revisions stay on it.
+    """
+    returned = (llm_result or {}).get("plan")
+    if not isinstance(returned, dict):
+        return prior
+    strategy = str(returned.get("strategy") or "").strip()[:2000]
+    queries = sanitize_theme_queries(returned.get("theme_queries"))
+    if prior is None:
+        return DeckPlan(strategy=strategy, theme_queries=queries) if strategy else None
+    if returned.get("changed") is True and strategy:
+        notes.append(f"Game plan updated per your request: {strategy}")
+        return DeckPlan(strategy=strategy, theme_queries=queries or prior.theme_queries)
+    return prior
 
 
 def _drop_invalid_revamp_cards(

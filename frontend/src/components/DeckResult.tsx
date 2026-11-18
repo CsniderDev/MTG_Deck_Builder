@@ -139,6 +139,11 @@ export default function DeckResult({
         </div>
 
         <aside className="deck-explanation">
+          {deck.plan?.strategy && (
+            <p className="deck-plan">
+              <strong>Game plan:</strong> {deck.plan.strategy}
+            </p>
+          )}
           <h3>Explanation</h3>
           {deck.explanation.split(/\n+/).map((paragraph, idx) => (
             <p key={idx}>{paragraph}</p>

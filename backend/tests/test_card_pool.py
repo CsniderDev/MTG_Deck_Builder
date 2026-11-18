@@ -304,3 +304,22 @@ async def test_rarely_played_theme_cards_not_on_edhrec_are_tagged_gems():
     pool = await build_card_pool(scryfall, [ATRAXA], {}, ["o:proliferate"], set(), set(), 3)
     assert "gem" in pool.get("Deep Cut").tags
     assert "gem" not in pool.get("Popular Theme Card").tags
+
+
+def test_fallback_theme_queries_from_concept_text():
+    from app.services.card_pool import fallback_theme_queries
+
+    assert fallback_theme_queries("proliferate experience counters") == ['o:"experience counter"', "o:proliferate"]
+    assert fallback_theme_queries("Lifegain and lifedrain") == ["o:lifegain", "o:lifedrain"]
+    assert fallback_theme_queries("+1/+1 counters") == ['o:"+1/+1 counter"']
+    assert fallback_theme_queries("") == []
+
+
+def test_plan_theme_queries_tolerates_alternate_keys():
+    from app.services.card_pool import plan_theme_queries
+
+    assert plan_theme_queries({"theme_queries": ["o:a"]}) == ["o:a"]
+    assert plan_theme_queries({"themeQueries": ["o:b"]}) == ["o:b"]
+    assert plan_theme_queries({"queries": ["o:c"]}) == ["o:c"]
+    assert plan_theme_queries({"strategy": "x"}) == []
+    assert plan_theme_queries(None) == []

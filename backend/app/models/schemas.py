@@ -65,6 +65,13 @@ class BuildDeckRequest(BaseModel):
     turnstile_token: Optional[str] = Field(default=None, max_length=4000)
 
 
+class DeckPlan(BaseModel):
+    """A deck's core game plan, kept across revisions so revamps stay on theme."""
+
+    strategy: str = Field(default="", max_length=2000)
+    theme_queries: list[str] = Field(default_factory=list, max_length=4)
+
+
 class RevampDeckRequest(BaseModel):
     commander: str
     secondary_commander: Optional[str] = Field(default=None, max_length=200)
@@ -76,6 +83,9 @@ class RevampDeckRequest(BaseModel):
     previous_decklist: list[MagicCard] = Field(..., max_length=300)
     change_request: str = Field(..., min_length=1, max_length=4000)
     turnstile_token: Optional[str] = Field(default=None, max_length=4000)
+    # The plan returned with the deck being revised; omitted for imported decks, in
+    # which case the revision infers one and returns it.
+    plan: Optional[DeckPlan] = None
 
 
 class DeckResponse(BaseModel):
@@ -90,6 +100,7 @@ class DeckResponse(BaseModel):
     notes: list[str] = Field(default_factory=list)
     substitutions: list[DeckSubstitution] = Field(default_factory=list)
     source: Literal["llm", "heuristic"]
+    plan: Optional[DeckPlan] = None
 
 
 class AutocompleteResponse(BaseModel):

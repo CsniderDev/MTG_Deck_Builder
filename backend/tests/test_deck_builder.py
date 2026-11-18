@@ -602,3 +602,65 @@ async def test_revamp_enforces_35_land_floor_without_cutting_just_added_cards():
     assert basics == 35
     assert "New Addition" in names  # listed last, but protected as a just-added card
     assert any("Deck had only 29 lands" in n for n in result.notes)
+
+
+# --- keeping the game plan across revisions ---------------------------------------------
+
+
+def test_next_plan_keeps_prior_plan_unless_explicitly_changed():
+    from app.models.schemas import DeckPlan
+    from app.services.deck_builder import _next_plan
+
+    prior = DeckPlan(strategy="Proliferate experience counters.", theme_queries=['o:"experience counter"'])
+    notes = []
+    # The LLM restating (or drifting) the plan without "changed" keeps the original.
+    assert _next_plan(prior, {"plan": {"changed": False, "strategy": "Generic goodstuff."}}, notes) == prior
+    assert _next_plan(prior, {}, notes) == prior
+    assert _next_plan(prior, None, notes) == prior
+    assert notes == []
+    # An explicit change is adopted and reported.
+    changed = _next_plan(prior, {"plan": {"changed": True, "strategy": "Superfriends.", "theme_queries": ["t:planeswalker"]}}, notes)
+    assert changed.strategy == "Superfriends." and changed.theme_queries == ["t:planeswalker"]
+    assert any("Game plan updated" in n for n in notes)
+    # Imported decks (no prior plan) adopt the inferred one.
+    inferred = _next_plan(None, {"plan": {"changed": False, "strategy": "Infect.", "theme_queries": ["kw:infect"]}}, [])
+    assert inferred.strategy == "Infect." and inferred.theme_queries == ["kw:infect"]
+
+
+@pytest.mark.asyncio
+async def test_build_returns_its_plan_and_revamp_sends_it_back_with_theme_candidates():
+    from app.models.schemas import DeckPlan
+
+    class _RecordingLLM(_StubLLM):
+        async def plan_deck(self, **kwargs):
+            return {"strategy": "Proliferate experience counters.", "targets": {}, "theme_queries": ['o:"experience counter"']}
+
+        async def revamp_deck(self, **kwargs):
+            self.revamp_kwargs = kwargs
+            return {
+                "decklist": [{"name": "Sol Ring", "count": 1}],
+                "explanation": "Added removal.",
+                "substitutions": [],
+                "plan": {"changed": False, "strategy": "Now a generic deck."},
+            }
+
+    llm = _RecordingLLM(payload={"decklist": [{"name": "Card 1"}], "explanation": "x"})
+    builder = DeckBuilder(_StubScryfall(), _StubEDHRec(), llm)
+    built = await builder.build(BuildDeckRequest(commander="Atraxa", bracket=3, prompt="experience counters"))
+    assert built.plan == DeckPlan(strategy="Proliferate experience counters.", theme_queries=['o:"experience counter"'])
+
+    revised = await builder.revamp(
+        RevampDeckRequest(
+            commander="Atraxa",
+            bracket=3,
+            prompt="experience counters",
+            previous_decklist=[MagicCard(name="Card 1", count=1)],
+            change_request="more removal",
+            plan=built.plan,
+        )
+    )
+    assert llm.revamp_kwargs["plan_strategy"] == "Proliferate experience counters."
+    # Theme candidates come from the plan's searches and skip cards already in the deck.
+    assert "Card 2" in llm.revamp_kwargs["theme_candidates"]
+    assert "Card 1 " not in llm.revamp_kwargs["theme_candidates"]
+    assert revised.plan == built.plan  # not explicitly changed, so the plan is kept

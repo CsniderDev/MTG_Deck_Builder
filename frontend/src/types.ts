@@ -22,6 +22,13 @@ export interface DeckResponse {
   notes: string[];
   substitutions: DeckSubstitution[];
   source: DeckSource;
+  /** The deck's core game plan, sent back with revisions so they stay on theme. */
+  plan?: DeckPlan | null;
+}
+
+export interface DeckPlan {
+  strategy: string;
+  theme_queries: string[];
 }
 
 export interface DeckSubstitution {
@@ -48,6 +55,7 @@ export interface RevampDeckPayload extends BuildDeckPayload {
   previous_version: number;
   previous_decklist: MagicCard[];
   change_request: string;
+  plan?: DeckPlan | null;
 }
 
 export interface HealthStatus {

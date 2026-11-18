@@ -168,6 +168,13 @@ ask the LLM to redo anything, so it can drift from what the server would produce
    added; then `_enforce_land_count` and `_balance_basic_lands` run as before.
 
 Without a concept the same pool is assembled with default targets (`source="heuristic"`).
+If the plan has no usable theme queries, `fallback_theme_queries` derives them from the concept text.
+
+**Plans persist across revisions.** Builds return `DeckResponse.plan` (`DeckPlan`: strategy + theme
+queries); the frontend sends it back as `RevampDeckRequest.plan`. Revamp puts the plan first in the
+prompt, re-runs its theme queries to offer on-theme candidates (`render_theme_candidates`), and keeps
+the plan unless the LLM reports `plan.changed` (only for requests that explicitly change the game plan;
+`_next_plan`). Imported decks with no plan adopt the one the first revision infers.
 Revamp still uses the name-based single-call flow, but now drops cards that fail validation.
 Scryfall requests are spaced 500ms apart for search/named/collection endpoints (100ms for others)
 with 429 retry/backoff - bursts above that earned 16-60s penalties.
