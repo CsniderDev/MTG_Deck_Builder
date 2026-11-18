@@ -24,7 +24,7 @@ export default function DeckDiff({
   }
 
   return (
-    <section className="deck-diff" aria-label="Deck substitutions">
+    <section id="deck-replacements" className="deck-diff" aria-label="Deck substitutions">
       <h3>LLM substitutions</h3>
       <div className="deck-diff__list">
         {substitutions.map((substitution, index) => (

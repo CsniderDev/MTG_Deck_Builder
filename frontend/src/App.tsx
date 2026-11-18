@@ -1,4 +1,4 @@
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import AccessCodeField from './components/AccessCodeField';
 import DeckForm from './components/DeckForm';
 import DeckResult from './components/DeckResult';
@@ -156,6 +156,18 @@ export default function App(): React.ReactElement {
   const [revamping, setRevamping] = useState<boolean>(false);
   const [error, setError] = useState<string>('');
   const [health, setHealth] = useState<HealthStatus | null>(null);
+  // Set after a revamp so the page scrolls to the replacements once the new deck renders.
+  const scrollToReplacements = useRef<boolean>(false);
+
+  useEffect(() => {
+    if (!scrollToReplacements.current || !newDeck) return;
+    scrollToReplacements.current = false;
+    requestAnimationFrame(() => {
+      // Fall back to the top of the deck when a revamp made no swaps.
+      const target = document.getElementById('deck-replacements') ?? document.querySelector('.deck-result');
+      target?.scrollIntoView?.({ behavior: 'smooth', block: 'start' });
+    });
+  }, [newDeck]);
   const [bannedList, setBannedList] = useState<string[]>([]);
   const [gamechangers, setGamechangers] = useState<string[]>([]);
 
@@ -218,6 +230,7 @@ export default function App(): React.ReactElement {
         previous_decklist: previousDecklist,
         change_request: values.prompt,
       });
+      scrollToReplacements.current = true;
       setNewDeck(result);
       setPreviousLibraryForCurrentDeck(previousDecklist.map((card) => cloneMagicCard(card)));
       setSession({ mode: 'existing', values });
@@ -259,6 +272,7 @@ export default function App(): React.ReactElement {
         plan: newDeck.plan ?? undefined,
       };
       const result = await revampDeck(basePayload);
+      scrollToReplacements.current = true;
       setNewDeck(result);
       setPreviousLibraryForCurrentDeck(previousLibrary);
       return deckIdentitySignature(result) !== previousDeckSignature;

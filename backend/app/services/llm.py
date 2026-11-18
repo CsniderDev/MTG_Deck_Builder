@@ -24,9 +24,9 @@ logger = logging.getLogger(__name__)
 
 
 _DECK_SCHEMA_INSTRUCTIONS = """
-Respond ONLY with a single JSON object, no prose, no markdown fences. Schema:
+Respond ONLY with a single JSON object, no prose, no markdown fences. Do NOT return the
+full decklist - return only the swaps; the server applies them to the current list. Schema:
 {
-  "decklist": [{"name": "<exact card name>", "count": <int>, "category": "<short label>"}],
   "explanation": "<2-4 paragraph plain-text explanation of the deck plan>",
   "notes": ["<optional short bullet>", "..."],
   "substitutions": [
@@ -38,8 +38,9 @@ Respond ONLY with a single JSON object, no prose, no markdown fences. Schema:
   ]
 }
 Rules:
-- The list must total exactly 99 cards (the commander is separate) unless there 
-  is a partner commander or a background card, the non-commander list must total at most 98 cards to allow for them.
+- The deck stays at its current size (99 cards, or 98 with a partner/background): every
+  swap removes exactly as many cards as it adds, and "removed" cards must come from the
+  current decklist. Keep at least 35 lands - only swap a land for a land.
 - Use the commander's color identity only. Never include cards outside it.
 - consider the theme of the commander and the user's concept as the primary direction for card selection. 
   Use the EDHREC recommendations as a reference pool, but substitute freely to honor the concept and constraints.
@@ -457,8 +458,9 @@ class LLMService:
             "current list, then keep to it)"
         )
         candidates_block = (
-            "On-theme candidates (verified Commander-legal and in the deck's colors; prefer "
-            "these when adding cards for the theme):\n"
+            "CARDS YOU MAY ADD - on-theme candidates that are NOT in the deck (verified "
+            "Commander-legal and in the deck's colors). Use these only in \"added\" lists; "
+            "never list them as \"removed\":\n"
             f"{theme_candidates}\n\n"
             if theme_candidates
             else ""
@@ -480,14 +482,19 @@ class LLMService:
             "on-plan cards first. Never swap theme pieces or synergy cards for generic staples "
             "unless the request asks for that.\n"
             "- Change only what the request needs; keep everything else.\n"
+            "- Every card in a substitution's \"removed\" list MUST be copied exactly from the "
+            "current decklist below - never remove a card the deck doesn't have. Each swap "
+            "removes as many cards as it adds, so the deck stays the same size. List EVERY "
+            "change as a swap - the server applies exactly your swaps and nothing else.\n"
             "- Only change the game plan when the request clearly asks for it (e.g. \"switch "
             "to...\", \"make it a ... deck instead\", \"change the theme/strategy\").\n\n"
             f"{candidates_block}"
             f"Here is a current list of banned cards. DO NOT include any of these cards at all:\n{json.dumps(list(banned_list or []))}\n\n"
             f"{gc_block}"
-            f"Current decklist (99 cards, compact JSON):\n{json.dumps(compact_previous_decklist)}\n\n"
-            f"Produce a revised 99-card decklist applying the change request while "
-            f"keeping the deck coherent and legal. For every meaningful swap, include "
+            "CURRENT DECKLIST - the ONLY cards that can appear in \"removed\" lists (compact "
+            f"JSON):\n{json.dumps(compact_previous_decklist)}\n\n"
+            f"Apply the change request as a list of swaps, keeping the deck coherent and "
+            f"legal. For every swap, include "
             f"a substitution entry listing the removed card(s), the added card(s), and "
             f"a concise explanation of why the substitution helps. Treat Universes Beyond "
             f"cards and alternate printed or reskinned names as valid whenever Scryfall "

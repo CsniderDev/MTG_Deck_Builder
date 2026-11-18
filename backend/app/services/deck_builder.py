@@ -388,7 +388,19 @@ class DeckBuilder:
             explanation = "LLM failed to revamp the deck. The previous decklist was preserved unchanged."
             source = "heuristic"
         else:
-            # Validate the new list AND every card a suggested swap adds - swaps used to
+            # Swap-based revisions: the current deck is the source of truth and only the
+            # listed swaps are applied. Rewriting all 99 cards let the LLM silently add,
+            # drop (often lands) or duplicate cards, which then got trimmed or padded
+            # without ever showing up as a swap. A model that returns a full list
+            # instead of swaps has its changes converted into swaps first.
+            if not llm_result.get("substitutions") and llm_result.get("decklist"):
+                llm_result = {
+                    **llm_result,
+                    "substitutions": _swaps_from_decklist_diff(previous_payload, llm_result["decklist"]),
+                }
+            llm_result = {**llm_result, "decklist": [dict(card) for card in previous_payload]}
+
+            # Validate the deck AND every card a suggested swap adds - swaps used to
             # skip validation, so off-color suggestions reached the UI.
             swap_additions = [
                 added
@@ -405,6 +417,11 @@ class DeckBuilder:
                 llm_result = _drop_invalid_revamp_cards(
                     llm_result, prefetched_cards, invalid_cards, previous_payload
                 )
+            llm_result = _apply_listed_swaps(
+                llm_result,
+                previous_payload,
+                DECK_SIZE_WITH_PARTNER if secondary_commander_card else DECK_SIZE,
+            )
             decklist, explanation, source, notes, substitutions = self._materialize(
                 llm_result,
                 command_zone,
@@ -420,6 +437,11 @@ class DeckBuilder:
             # user's own list and is returned untouched. Cards the revamp just added are
             # protected when spells must become lands.
             command_cards = [c for c in (commander_card, secondary_commander_card) if c]
+            # Below the land floor because a swap traded a land for a spell? Undo that
+            # swap first, rather than cutting an unrelated spell the user never saw.
+            decklist, substitutions = _revert_land_cutting_swaps(
+                decklist, substitutions, prefetched_cards, notes
+            )
             just_added = {
                 card.name for sub in substitutions for card in sub.added
             }
@@ -431,7 +453,14 @@ class DeckBuilder:
                 notes,
                 protected=just_added,
             )
+            decklist = _fit_deck_size(
+                decklist,
+                DECK_SIZE_WITH_PARTNER if secondary_commander_card else DECK_SIZE,
+                set(command_zone.get("color_identity") or []),
+                notes,
+            )
             decklist = await self._balance_basics(decklist, command_cards, notes)
+            substitutions = _reconcile_substitutions(substitutions, previous_payload, decklist)
         substitutions = await self._hydrate_substitutions(substitutions, prefetched_cards)
         next_version = (
             request.previous_version + 1
@@ -1340,6 +1369,302 @@ def _heuristic_decklist(
         if len(picks) >= target_nonland:
             break
     return picks
+
+
+def _card_counts(cards: Iterable[Any]) -> Counter:
+    """Name (lowercased) -> total count, for dicts or MagicCards."""
+    counts: Counter = Counter()
+    for card in cards:
+        name = card.get("name") if isinstance(card, dict) else getattr(card, "name", None)
+        count = card.get("count") if isinstance(card, dict) else getattr(card, "count", 1)
+        key = str(name or "").strip().lower()
+        if key:
+            try:
+                counts[key] += max(1, int(count or 1))
+            except (TypeError, ValueError):
+                counts[key] += 1
+    return counts
+
+
+def _revert_land_cutting_swaps(
+    decklist: list[MagicCard],
+    substitutions: list[DeckSubstitution],
+    card_data: dict[str, dict[str, Any]],
+    notes: list[str],
+) -> tuple[list[MagicCard], list[DeckSubstitution]]:
+    """Undo swaps that replaced lands with spells while the deck is under the land floor.
+
+    Latest swaps are undone first, and only until the deck is back at ``_MIN_LANDS``:
+    the removed land comes back and the added spell goes out, so the deck keeps the
+    same size and no unrelated card has to be cut.
+    """
+    if _land_count(decklist) >= _MIN_LANDS:
+        return decklist, substitutions
+
+    def is_land_name(name: str) -> bool:
+        if name in _BASIC_NAMES:
+            return True
+        data = card_data.get(name.strip().lower()) or {}
+        return "Land" in (data.get("type_line") or "").split("//")[0]
+
+    by_name = {card.name.lower(): card for card in decklist}
+    kept = list(substitutions)
+    reverted: list[str] = []
+    for sub in reversed(substitutions):
+        if _land_count(decklist) >= _MIN_LANDS:
+            break
+        removed_lands = [c for c in sub.removed if is_land_name(c.name)]
+        added_lands = [c for c in sub.added if is_land_name(c.name)]
+        if not removed_lands or added_lands:
+            continue
+        for card in sub.added:
+            existing = by_name.get(card.name.lower())
+            if existing is not None:
+                existing.count -= max(1, card.count or 1)
+                if existing.count <= 0:
+                    decklist.remove(existing)
+                    by_name.pop(card.name.lower(), None)
+        for card in sub.removed:
+            count = max(1, card.count or 1)
+            existing = by_name.get(card.name.lower())
+            if existing is not None:
+                existing.count += count
+            else:
+                data = card_data.get(card.name.strip().lower())
+                restored = _to_card(data) if data else MagicCard(name=card.name)
+                restored.count = count
+                restored.category = "Land" if is_land_name(card.name) else card.category
+                decklist.append(restored)
+                by_name[card.name.lower()] = restored
+        kept.remove(sub)
+        reverted.append(
+            f"{', '.join(c.name for c in sub.removed)} -> {', '.join(c.name for c in sub.added)}"
+        )
+    if reverted:
+        notes.append(
+            f"Undid {len(reverted)} swap(s) that would have dropped the deck below {_MIN_LANDS} lands: "
+            f"{'; '.join(reverted)}."
+        )
+    return decklist, kept
+
+
+def _fit_deck_size(
+    decklist: list[MagicCard], target: int, identity: set[str], notes: list[str]
+) -> list[MagicCard]:
+    """Last-resort size fix after a revision's adjustments, touching basics first.
+
+    Over size: trim the largest basic pile while the deck stays at the land floor,
+    otherwise the last-listed spell. Under size: add basics (colors are balanced next).
+    """
+    total = sum(card.count for card in decklist)
+    if total == target:
+        return decklist
+    changed: list[str] = []
+    while total > target:
+        basics = [c for c in decklist if c.name in _BASIC_NAMES and c.count > 0]
+        if basics and _land_count(decklist) > _MIN_LANDS:
+            pile = max(basics, key=lambda c: c.count)
+        else:
+            pile = next((c for c in reversed(decklist) if not _is_land(c)), None) or max(
+                decklist, key=lambda c: c.count
+            )
+        pile.count -= 1
+        changed.append(f"-{pile.name}")
+        if pile.count <= 0:
+            decklist.remove(pile)
+        total -= 1
+    if total < target:
+        basic = next((c for c in decklist if c.name in _BASIC_NAMES), None)
+        if basic is None:
+            color = next((c for c in "WUBRG" if c in identity), None)
+            basic = MagicCard(name=_BASIC_BY_COLOR[color] if color else "Wastes", count=0, category="Land")
+            decklist.append(basic)
+        basic.count += target - total
+        changed.append(f"+{target - total} {basic.name}")
+    notes.append(f"Adjusted the deck to exactly {target} cards ({', '.join(changed[:6])}).")
+    return decklist
+
+
+def _swaps_from_decklist_diff(
+    previous_payload: list[dict[str, Any]], decklist: list[Any]
+) -> list[dict[str, Any]]:
+    """Turn a full revised list into swaps (removed[i] paired with added[i])."""
+    before = _card_counts(previous_payload)
+    after = _card_counts(e for e in decklist if isinstance(e, dict))
+    names = {}
+    for card in list(previous_payload) + [e for e in decklist if isinstance(e, dict)]:
+        names.setdefault(str(card.get("name") or "").strip().lower(), str(card.get("name") or "").strip())
+    removed = [{"name": names[k], "count": before[k] - after[k]} for k in before if before[k] > after[k]]
+    added = [{"name": names[k], "count": after[k] - before[k]} for k in after if after[k] > before[k]]
+    swaps = []
+    for i in range(max(len(removed), len(added))):
+        swaps.append(
+            {
+                "removed": removed[i : i + 1],
+                "added": added[i : i + 1],
+                "explanation": "Change from the revised list.",
+            }
+        )
+    return swaps
+
+
+def _apply_listed_swaps(
+    llm_result: dict[str, Any],
+    previous_payload: list[dict[str, Any]],
+    deck_size: Optional[int] = None,
+) -> dict[str, Any]:
+    """Make the revised decklist match the swaps the LLM listed.
+
+    LLMs often describe a swap ("X -> Y") but forget to take X out of (or put Y into)
+    the decklist they return, so the UI showed replacements that never happened. Each
+    swap is applied relative to the previous deck: a removed card ends up at most at its
+    previous count minus the swapped count, an added card at least at its previous count
+    plus the swapped count.
+    """
+    subs = [s for s in llm_result.get("substitutions") or [] if isinstance(s, dict)]
+    if not subs:
+        return llm_result
+    previous = _card_counts(previous_payload)
+    entries: list[dict[str, Any]] = [dict(e) for e in llm_result.get("decklist") or [] if isinstance(e, dict)]
+    by_key = {str(e.get("name") or "").strip().lower(): e for e in entries}
+    current = _card_counts(entries)
+    fixed: list[str] = []
+
+    def set_count(name: str, key: str, count: int, category: Optional[str] = None) -> None:
+        if key in by_key:
+            if count <= 0:
+                entries.remove(by_key.pop(key))
+            else:
+                by_key[key]["count"] = count
+        elif count > 0:
+            entry = {"name": name, "count": count, "category": category}
+            entries.append(entry)
+            by_key[key] = entry
+        current[key] = max(0, count)
+
+    for sub in subs:
+        for card in sub.get("removed") or []:
+            if not isinstance(card, dict):
+                continue
+            key = str(card.get("name") or "").strip().lower()
+            if key not in previous:
+                continue  # never in the deck, nothing to remove
+            target = max(0, previous[key] - max(1, int(card.get("count") or 1)))
+            if current[key] > target:
+                set_count(str(card.get("name")), key, target)
+                fixed.append(f"removed {card.get('name')}")
+        for card in sub.get("added") or []:
+            if not isinstance(card, dict):
+                continue
+            key = str(card.get("name") or "").strip().lower()
+            target = previous[key] + max(1, int(card.get("count") or 1))
+            if current[key] < target:
+                set_count(str(card.get("name")), key, target, "Swap")
+                fixed.append(f"added {card.get('name')}")
+
+    # Uneven swaps - adding more cards than they really remove (including "removing" a
+    # card the deck doesn't have) - overfill the deck, and trimming would then cut
+    # unrelated cards. Instead, drop the extra additions, latest swap and latest card
+    # first, until the deck fits; a swap left with nothing real is dropped entirely.
+    skipped: list[str] = []
+    kept_subs = list(subs)
+    if deck_size is not None:
+        for sub in reversed(subs):
+            if sum(current.values()) <= deck_size:
+                break
+            real_removed = sum(
+                min(previous[str(c.get("name") or "").strip().lower()], max(1, int(c.get("count") or 1)))
+                for c in sub.get("removed") or []
+                if isinstance(c, dict)
+            )
+            added = [c for c in sub.get("added") or [] if isinstance(c, dict)]
+            surplus = sum(max(1, int(c.get("count") or 1)) for c in added) - real_removed
+            dropped: list[str] = []
+            for card in reversed(added):
+                if surplus <= 0 or sum(current.values()) <= deck_size:
+                    break
+                key = str(card.get("name") or "").strip().lower()
+                if current[key] > previous[key]:
+                    set_count(str(card.get("name")), key, current[key] - 1)
+                    surplus -= 1
+                    dropped.append(str(card.get("name")))
+                    if current[key] <= previous[key]:
+                        card["_dropped"] = True
+            if not dropped:
+                continue
+            sub["added"] = [c for c in added if not c.get("_dropped")]
+            missing = [str(c.get("name")) for c in sub.get("removed") or [] if isinstance(c, dict)]
+            if not sub["added"] and not real_removed:
+                kept_subs.remove(sub)
+            reason = (
+                f"for {', '.join(missing)}, which isn't in your deck"
+                if missing and not real_removed
+                else "it added more cards than it removed"
+            )
+            skipped.append(f"{', '.join(dropped)} ({reason})")
+
+        # The opposite: swaps that remove more than they add leave the deck short, and
+        # padding would fill the gap with basics. Put the extra removed cards back.
+        for sub in reversed(kept_subs):
+            if sum(current.values()) >= deck_size:
+                break
+            added_count = sum(
+                max(1, int(c.get("count") or 1)) for c in sub.get("added") or [] if isinstance(c, dict)
+            )
+            removed = [c for c in sub.get("removed") or [] if isinstance(c, dict)]
+            deficit = sum(
+                min(previous[str(c.get("name") or "").strip().lower()], max(1, int(c.get("count") or 1)))
+                for c in removed
+            ) - added_count
+            restored: Counter = Counter()
+            for card in reversed(removed):
+                if deficit <= 0 or sum(current.values()) >= deck_size:
+                    break
+                key = str(card.get("name") or "").strip().lower()
+                if current[key] < previous[key]:
+                    set_count(str(card.get("name")), key, current[key] + 1)
+                    deficit -= 1
+                    restored[key] += 1
+            if restored:
+                still_removed = []
+                for card in removed:
+                    key = str(card.get("name") or "").strip().lower()
+                    left = max(1, int(card.get("count") or 1)) - restored[key]
+                    if left > 0:
+                        still_removed.append({**card, "count": left})
+                sub["removed"] = still_removed
+                kept_names = ", ".join(str(c.get("name")) for c in removed if restored[str(c.get("name") or "").strip().lower()])
+                skipped.append(f"kept {kept_names} (the swap removed more cards than it added)")
+
+    if not fixed and not skipped:
+        return llm_result
+    notes = list(llm_result.get("notes") or [])
+    if skipped:
+        notes.append(
+            f"Evened out {len(skipped)} uneven swap(s) so the deck keeps its size: {'; '.join(skipped[:6])}"
+            f"{'...' if len(skipped) > 6 else ''}."
+        )
+    return {**llm_result, "decklist": entries, "substitutions": kept_subs, "notes": notes}
+
+
+def _reconcile_substitutions(
+    substitutions: list[DeckSubstitution], previous_payload: list[dict[str, Any]], final_deck: list[MagicCard]
+) -> list[DeckSubstitution]:
+    """Keep only the parts of each swap that really happened in the final deck.
+
+    Later steps (trimming, the land-count floor, basic balancing) can still change the
+    deck, so swaps are checked against the final list: a removed card is only shown if
+    the deck now has fewer of it than before, an added card only if it now has more.
+    """
+    previous = _card_counts(previous_payload)
+    final = _card_counts(final_deck)
+    kept: list[DeckSubstitution] = []
+    for sub in substitutions:
+        removed = [c for c in sub.removed if final[c.name.strip().lower()] < previous[c.name.strip().lower()]]
+        added = [c for c in sub.added if final[c.name.strip().lower()] > previous[c.name.strip().lower()]]
+        if removed or added:
+            kept.append(sub.model_copy(update={"removed": removed, "added": added}))
+    return kept
 
 
 def _next_plan(

@@ -525,7 +525,9 @@ async def test_revamp_drops_off_color_cards_instead_of_keeping_them():
     names = {c.name for c in result.decklist}
     assert "Sol Ring" in names
     assert "Lightning Bolt" not in names
-    assert any("Removed invalid card(s) from the list: Lightning Bolt" in note for note in result.notes)
+    # The full list (no swaps) is turned into swaps; the off-color one is reverted.
+    assert any("Reverted swap(s)" in note and "Lightning Bolt (Color Mismatch)" in note for note in result.notes)
+    assert all(card.name != "Lightning Bolt" for sub in result.substitutions for card in sub.added)
 
 
 class _OffColorBoltScryfall(_StubScryfall):
@@ -579,10 +581,13 @@ async def test_revamp_reverts_swaps_that_add_off_color_cards():
 
 @pytest.mark.asyncio
 async def test_revamp_enforces_35_land_floor_without_cutting_just_added_cards():
+    # The user's deck is already short on lands (29); one swap adds New Addition.
+    previous = (
+        [MagicCard(name=f"Card {i}", count=1) for i in range(69)]
+        + [MagicCard(name="Card 99", count=1)]
+        + [MagicCard(name="Plains", count=29)]
+    )
     payload = {
-        "decklist": [{"name": f"Card {i}", "count": 1} for i in range(69)]
-        + [{"name": "New Addition", "count": 1}]
-        + [{"name": "Plains", "count": 29}],
         "explanation": "Revised.",
         "substitutions": [
             {"removed": [{"name": "Card 99", "count": 1}], "added": [{"name": "New Addition", "count": 1}], "explanation": "x"}
@@ -592,7 +597,7 @@ async def test_revamp_enforces_35_land_floor_without_cutting_just_added_cards():
     request = RevampDeckRequest(
         commander="Atraxa",
         bracket=3,
-        previous_decklist=[MagicCard(name="Card 99", count=1)],
+        previous_decklist=previous,
         change_request="swap one card",
     )
     result = await builder.revamp(request)
@@ -664,3 +669,154 @@ async def test_build_returns_its_plan_and_revamp_sends_it_back_with_theme_candid
     assert "Card 2" in llm.revamp_kwargs["theme_candidates"]
     assert "Card 1 " not in llm.revamp_kwargs["theme_candidates"]
     assert revised.plan == built.plan  # not explicitly changed, so the plan is kept
+
+
+# --- swaps must match the deck ------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_revamp_applies_listed_swaps_the_decklist_missed():
+    # The LLM says "Old Card -> Sol Ring" but returns a decklist that still has Old Card
+    # and never added Sol Ring - the bug where the UI showed a replacement that didn't happen.
+    previous = [MagicCard(name="Old Card", count=1), MagicCard(name="Keeper", count=1)]
+    payload = {
+        "decklist": [{"name": "Old Card", "count": 1}, {"name": "Keeper", "count": 1}],
+        "explanation": "Revised.",
+        "substitutions": [
+            {"removed": [{"name": "Old Card", "count": 1}], "added": [{"name": "Sol Ring", "count": 1}], "explanation": "Ramp."}
+        ],
+    }
+    builder = DeckBuilder(_StubScryfall(), _StubEDHRec(), _StubLLM(payload))
+    result = await builder.revamp(
+        RevampDeckRequest(commander="Atraxa", bracket=3, previous_decklist=previous, change_request="more ramp")
+    )
+    names = {c.name for c in result.decklist}
+    assert "Old Card" not in names
+    assert "Sol Ring" in names
+    assert [(s.removed[0].name, s.added[0].name) for s in result.substitutions] == [("Old Card", "Sol Ring")]
+
+
+def test_reconcile_only_shows_swap_parts_that_happened():
+    from app.models.schemas import DeckSubstitution
+    from app.services.deck_builder import _reconcile_substitutions
+
+    previous = [{"name": "Old Card", "count": 1}, {"name": "Still Here", "count": 1}, {"name": "Forest", "count": 10}]
+    final = [MagicCard(name="Still Here", count=1), MagicCard(name="New Card", count=1), MagicCard(name="Forest", count=9)]
+    subs = [
+        DeckSubstitution(removed=[MagicCard(name="Old Card")], added=[MagicCard(name="New Card")], explanation="ok"),
+        DeckSubstitution(removed=[MagicCard(name="Still Here")], added=[MagicCard(name="Never Added")], explanation="didn't happen"),
+        DeckSubstitution(removed=[MagicCard(name="Forest")], added=[MagicCard(name="Ghost")], explanation="half happened"),
+    ]
+    kept = _reconcile_substitutions(subs, previous, final)
+    assert [[c.name for c in s.removed] for s in kept] == [["Old Card"], ["Forest"]]
+    assert [[c.name for c in s.added] for s in kept] == [["New Card"], []]
+
+
+def test_swaps_removing_cards_not_in_the_deck_are_skipped_when_they_overfill_it():
+    from app.services.deck_builder import _apply_listed_swaps
+
+    previous = [{"name": f"Card {i}", "count": 1} for i in range(4)]
+    llm_result = {
+        # 4-card "deck": Card 0 was swapped for New A (fine); "Ghost" was never in the
+        # deck, so swapping it for New B would make 5 cards.
+        "decklist": [{"name": "New A"}, {"name": "Card 1"}, {"name": "Card 2"}, {"name": "Card 3"}, {"name": "New B"}],
+        "substitutions": [
+            {"removed": [{"name": "Card 0"}], "added": [{"name": "New A"}], "explanation": "real"},
+            {"removed": [{"name": "Ghost"}], "added": [{"name": "New B"}], "explanation": "hallucinated"},
+        ],
+    }
+    result = _apply_listed_swaps(llm_result, previous, deck_size=4)
+    names = [e["name"] for e in result["decklist"]]
+    assert "New B" not in names and "New A" in names and len(names) == 4
+    assert [s["explanation"] for s in result["substitutions"]] == ["real"]
+    assert any("Evened out 1 uneven swap" in n and "Ghost" in n for n in result["notes"])
+
+
+@pytest.mark.asyncio
+async def test_revamp_applies_only_listed_swaps_ignoring_a_drifting_full_list():
+    # The LLM returns swaps AND a full list that silently drops a land and adds a
+    # stowaway. Only the swap may change the deck.
+    previous = [MagicCard(name=f"Card {i}", count=1) for i in range(63)] + [MagicCard(name="Plains", count=36)]
+    payload = {
+        "decklist": [{"name": f"Card {i}", "count": 1} for i in range(1, 63)]
+        + [{"name": "New Card", "count": 1}, {"name": "Stowaway", "count": 1}, {"name": "Plains", "count": 35}],
+        "explanation": "Revised.",
+        "substitutions": [{"removed": [{"name": "Card 0"}], "added": [{"name": "New Card"}], "explanation": "upgrade"}],
+    }
+    builder = DeckBuilder(_StubScryfall(), _StubEDHRec(), _StubLLM(payload))
+    result = await builder.revamp(
+        RevampDeckRequest(commander="Atraxa", bracket=3, previous_decklist=previous, change_request="one upgrade")
+    )
+    counts = {c.name: c.count for c in result.decklist}
+    assert "New Card" in counts and "Card 0" not in counts
+    assert "Stowaway" not in counts  # not part of any swap
+    assert sum(c.count for c in result.decklist if c.name in {"Plains", "Island", "Swamp", "Forest"}) == 36
+    assert not any("Trimmed" in n for n in result.notes)
+
+
+def test_land_cutting_swaps_are_undone_before_cutting_unrelated_spells():
+    from app.models.schemas import DeckSubstitution
+    from app.services.deck_builder import _revert_land_cutting_swaps
+
+    deck = [MagicCard(name=f"Spell {i}", count=1, type_line="Sorcery") for i in range(64)]
+    deck += [MagicCard(name="Mountain", count=33, type_line="Basic Land - Mountain"), MagicCard(name="Draw Spell", count=1, type_line="Sorcery"), MagicCard(name="Other New", count=1, type_line="Sorcery")]
+    subs = [
+        DeckSubstitution(removed=[MagicCard(name="Spell 99")], added=[MagicCard(name="Other New")], explanation="spell for spell"),
+        DeckSubstitution(removed=[MagicCard(name="Rugged Highlands")], added=[MagicCard(name="Draw Spell")], explanation="land for spell"),
+        DeckSubstitution(removed=[MagicCard(name="Mountain")], added=[MagicCard(name="Ghost Draw")], explanation="basic for spell"),
+    ]
+    data = {"rugged highlands": {"name": "Rugged Highlands", "type_line": "Land", "id": "rh"}}
+    notes = []
+    # 33 lands; two land->spell swaps exist, the later (Mountain) one is undone first,
+    # then Rugged Highlands - stopping as soon as the deck is back at 35.
+    deck, kept = _revert_land_cutting_swaps(deck, subs, data, notes)
+    names = {c.name: c.count for c in deck}
+    assert names["Mountain"] == 34 and names.get("Rugged Highlands") == 1
+    assert "Draw Spell" not in names
+    assert [s.explanation for s in kept] == ["spell for spell"]
+    assert any("Undid 2 swap(s)" in n for n in notes)
+
+
+def test_uneven_swap_drops_its_extra_addition_instead_of_trimming_other_cards():
+    from app.services.deck_builder import _apply_listed_swaps
+
+    previous = [{"name": f"Card {i}", "count": 1} for i in range(4)]
+    llm_result = {
+        "decklist": [dict(c) for c in previous],
+        "substitutions": [
+            {"removed": [{"name": "Card 0"}], "added": [{"name": "New A"}, {"name": "New B"}], "explanation": "2 for 1"},
+        ],
+    }
+    result = _apply_listed_swaps(llm_result, previous, deck_size=4)
+    names = sorted(e["name"] for e in result["decklist"])
+    assert names == ["Card 1", "Card 2", "Card 3", "New A"]
+    assert [c["name"] for c in result["substitutions"][0]["added"]] == ["New A"]
+    assert any("New B (it added more cards than it removed)" in n for n in result["notes"])
+
+
+def test_fit_deck_size_trims_basics_above_the_floor_and_pads_when_short():
+    from app.services.deck_builder import _fit_deck_size
+
+    deck = [MagicCard(name=f"S{i}", type_line="Sorcery") for i in range(63)] + [MagicCard(name="Mountain", count=37, type_line="Basic Land - Mountain")]
+    deck = _fit_deck_size(deck, 99, {"R"}, [])
+    assert sum(c.count for c in deck) == 99 and next(c for c in deck if c.name == "Mountain").count == 36
+    short = [MagicCard(name=f"S{i}", type_line="Sorcery") for i in range(60)]
+    short = _fit_deck_size(short, 99, {"R"}, [])
+    assert sum(c.count for c in short) == 99 and next(c for c in short if c.name == "Mountain").count == 39
+
+
+def test_swap_removing_more_than_it_adds_keeps_the_extra_card():
+    from app.services.deck_builder import _apply_listed_swaps
+
+    previous = [{"name": f"Card {i}", "count": 1} for i in range(4)]
+    llm_result = {
+        "decklist": [dict(c) for c in previous],
+        "substitutions": [
+            {"removed": [{"name": "Card 0"}, {"name": "Card 1"}], "added": [{"name": "New A"}], "explanation": "1 for 2"},
+        ],
+    }
+    result = _apply_listed_swaps(llm_result, previous, deck_size=4)
+    # The last-listed removal (Card 1) is put back; the swap becomes Card 0 -> New A.
+    assert sorted(e["name"] for e in result["decklist"]) == ["Card 1", "Card 2", "Card 3", "New A"]
+    assert [c["name"] for c in result["substitutions"][0]["removed"]] == ["Card 0"]
+    assert any("Evened out 1 uneven swap" in n and "kept Card 1" in n for n in result["notes"])
