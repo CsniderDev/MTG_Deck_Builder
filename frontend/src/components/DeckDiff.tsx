@@ -36,7 +36,7 @@ export default function DeckDiff({
                   {substitution.removed.length ? substitution.removed.map((card) => (
                     <div key={`removed-${card.name}`} className="deck-diff__card-pill deck-diff__card-pill--removed">
                       <div className="deck-diff__card-media">
-                        <MagicCardItem card={card} disableHover={true} />
+                        <MagicCardItem card={card} />
                       </div>
                       <span className="deck-diff__cards">{card.count > 1 ? `${card.count}x ` : ''}{card.name}</span>
                     </div>
@@ -50,7 +50,7 @@ export default function DeckDiff({
                   {substitution.added.length ? substitution.added.map((card) => (
                     <div key={`added-${card.name}`} className="deck-diff__card-pill deck-diff__card-pill--added">
                       <div className="deck-diff__card-media">
-                        <MagicCardItem card={card} disableHover={true} />
+                        <MagicCardItem card={card} />
                       </div>
                       <span className="deck-diff__cards">{card.count > 1 ? `${card.count}x ` : ''}{card.name}</span>
                     </div>
