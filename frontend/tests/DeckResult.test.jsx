@@ -35,11 +35,28 @@ describe('DeckResult', () => {
     expect(screen.getByText(/12 cards total/)).toBeInTheDocument();
   });
 
-  it('groups cards by category', () => {
+  it('groups cards by type, in type order, with counts', () => {
+    const deck = makeDeck({
+      decklist: [
+        { name: 'Sol Ring', count: 1, category: 'Ramp', type_line: 'Artifact' },
+        { name: 'Swords to Plowshares', count: 1, category: 'Removal', type_line: 'Instant' },
+        { name: 'Solemn Simulacrum', count: 1, category: 'Ramp', type_line: 'Artifact Creature — Golem' },
+        { name: 'Dryad Arbor', count: 1, category: 'Land', type_line: 'Land Creature — Forest Dryad' },
+        { name: 'Forest', count: 8, category: 'Land', type_line: 'Basic Land — Forest' },
+        { name: 'Bala Ged Recovery // Bala Ged Sanctuary', count: 1, category: 'Utility', type_line: 'Sorcery // Land' },
+      ],
+    });
+    render(<DeckResult deck={deck} onRevamp={() => {}} onRevertSubstitution={() => {}} revamping={false} />);
+    const headings = screen.getAllByRole('heading', { level: 3 }).map((h) => h.textContent);
+    const groups = headings.filter((h) => /\(\d+\)$/.test(h));
+    expect(groups).toEqual(['Creatures (1)', 'Instants (1)', 'Sorceries (1)', 'Artifacts (1)', 'Lands (9)']);
+  });
+
+  it('falls back to the backend category when a card has no type line', () => {
     render(<DeckResult deck={makeDeck()} onRevamp={() => {}} onRevertSubstitution={() => {}} revamping={false} />);
-    expect(screen.getByRole('heading', { name: /^Ramp$/i })).toBeInTheDocument();
-    expect(screen.getByRole('heading', { name: /^Removal$/i })).toBeInTheDocument();
-    expect(screen.getByRole('heading', { name: /^Land$/i })).toBeInTheDocument();
+    expect(screen.getByRole('heading', { name: /^Ramp \(2\)$/i })).toBeInTheDocument();
+    expect(screen.getByRole('heading', { name: /^Removal \(1\)$/i })).toBeInTheDocument();
+    expect(screen.getByRole('heading', { name: /^Land \(8\)$/i })).toBeInTheDocument();
     expect(screen.getByText(/Sol Ring/)).toBeInTheDocument();
     expect(screen.getByText(/Arcane Signet/)).toBeInTheDocument();
   });

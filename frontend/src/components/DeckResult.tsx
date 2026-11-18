@@ -5,19 +5,54 @@ import DeckStats from './DeckStats';
 import DeckDiff from './DeckDiff';
 import TurnstileWidget from './TurnstileWidget';
 
+// Display groups, in on-screen order. A card with several types goes in the first
+// matching group by TYPE_PRIORITY (e.g. an artifact creature is a Creature).
+const TYPE_GROUPS = ['Creature', 'Planeswalker', 'Battle', 'Instant', 'Sorcery', 'Artifact', 'Enchantment', 'Land'];
+const TYPE_PRIORITY = ['Land', 'Creature', 'Planeswalker', 'Battle', 'Artifact', 'Enchantment', 'Instant', 'Sorcery'];
+const GROUP_LABELS: Record<string, string> = {
+  Creature: 'Creatures',
+  Planeswalker: 'Planeswalkers',
+  Battle: 'Battles',
+  Instant: 'Instants',
+  Sorcery: 'Sorceries',
+  Artifact: 'Artifacts',
+  Enchantment: 'Enchantments',
+  Land: 'Lands',
+};
+
+export function cardTypeGroup(card: MagicCard): string {
+  /** Main card type of the front face; falls back to the backend category without a type line. */
+  const typeLine = (card.type_line || card.card_faces?.[0]?.type_line || '').split('//')[0];
+  if (!typeLine.trim()) return card.category || 'Other';
+  // Drop subtypes ("Creature — Goblin") so a subtype never decides the group.
+  const mainTypes = typeLine.split(/\s+[—-]\s+/)[0].toLowerCase().split(/\s+/);
+  return TYPE_PRIORITY.find((type) => mainTypes.includes(type.toLowerCase())) || 'Other';
+}
+
+export function groupByType(cards: MagicCard[]): [string, MagicCard[]][] {
+  /** Group cards by main type, ordered by TYPE_GROUPS, each group sorted by name. */
+  const groups = new Map<string, MagicCard[]>();
+  for (const card of cards) {
+    const group = cardTypeGroup(card);
+    if (!groups.has(group)) groups.set(group, []);
+    groups.get(group)!.push(card);
+  }
+  const rank = (group: string): number => {
+    const idx = TYPE_GROUPS.indexOf(group);
+    return idx === -1 ? TYPE_GROUPS.length : idx;
+  };
+  return [...groups.entries()]
+    .sort(([a], [b]) => rank(a) - rank(b))
+    .map(([group, list]) => [GROUP_LABELS[group] || group, [...list].sort((x, y) => x.name.localeCompare(y.name))]);
+}
+
 function buildDeckText(deck: DeckResponse): string {
   /** Convert a rendered deck into a text decklist suitable for clipboard export. */
   const lines: string[] = [`1 ${deck.commander.name}`];
   if (deck.secondary_commander) {
     lines.push(`1 ${deck.secondary_commander.name}`);
   }
-  const grouped = new Map<string, MagicCard[]>();
-  for (const card of deck.decklist) {
-    const cat = card.category || 'Other';
-    if (!grouped.has(cat)) grouped.set(cat, []);
-    grouped.get(cat)!.push(card);
-  }
-  for (const [cat, cards] of grouped) {
+  for (const [, cards] of groupByType(deck.decklist)) {
     for (const card of cards) lines.push(`${card.count} ${card.name}`);
   }
   return lines.join('\n');
@@ -71,12 +106,7 @@ export default function DeckResult({
     }
   }
 
-  const grouped = new Map<string, MagicCard[]>();
-  for (const card of deck.decklist) {
-    const cat = card.category || 'Other';
-    if (!grouped.has(cat)) grouped.set(cat, []);
-    grouped.get(cat)!.push(card);
-  }
+  const grouped = useMemo(() => groupByType(deck.decklist), [deck.decklist]);
 
   return (
     <section className="deck-result">
@@ -119,9 +149,11 @@ export default function DeckResult({
       ) : null}
       <div className="deck-result__body">
         <div className="deck-list">
-          {[...grouped.entries()].map(([cat, cards]) => (
+          {grouped.map(([cat, cards]) => (
             <div className="category" key={cat}>
-              <h3>{cat}</h3>
+              <h3>
+                {cat} <span className="category__count">({cards.reduce((sum, c) => sum + (c.count || 1), 0)})</span>
+              </h3>
               <ul className="card-stack-list">
                 {cards.map((card) => (
                   <li key={card.name} className="card-stack-item">

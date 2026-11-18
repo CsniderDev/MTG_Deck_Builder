@@ -628,3 +628,4 @@ button.secondary { background: var(--accent-2); color: #0a0c12; }
 .deck-diff__card-pill:hover .card-image { box-shadow: 0 10px 20px rgba(0,0,0,0.42); }
 .deck-diff__card-pill--removed:hover { border-color: rgba(255, 107, 107, 0.5); background: rgba(255, 107, 107, 0.12); }
 .deck-diff__card-pill--added:hover { border-color: rgba(87, 197, 111, 0.5); background: rgba(87, 197, 111, 0.12); }
+.category__count { color: var(--muted); font-weight: 500; }
