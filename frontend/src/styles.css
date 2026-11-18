@@ -411,6 +411,7 @@ button.secondary { background: var(--accent-2); color: #0a0c12; }
 .deck-explanation h3 { margin: 0 0 8px; font-size: 15px; }
 .deck-explanation p { color: var(--text); margin: 0 0 10px; font-size: 14px; line-height: 1.45; }
 .deck-explanation form { display: grid; gap: 10px; margin-top: 8px; }
+.revamp-request { min-height: 120px; line-height: 1.45; }
 
 .autocomplete { position: relative; }
 .autocomplete__loading {

@@ -151,11 +151,19 @@ export default function DeckResult({
 
           <h3>Revamp this deck</h3>
           <form onSubmit={handleRevampSubmit}>
-            <input             
-              type="text"
+            <textarea
+              className="revamp-request"
+              rows={5}
               value={changeRequest}
               onChange={(e) => setChangeRequest(e.target.value)}
-              placeholder="e.g. 'Swap out the infinite combos, add more board wipes, lower the curve.'"
+              onKeyDown={(e) => {
+                // Enter adds a new line; Ctrl/Cmd+Enter submits.
+                if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) {
+                  e.preventDefault();
+                  e.currentTarget.form?.requestSubmit();
+                }
+              }}
+              placeholder="e.g. 'Swap out the infinite combos, add more board wipes, lower the curve.' (Ctrl+Enter to submit)"
             />
             <button type="submit" className="secondary" disabled={revamping || !changeRequest.trim()}>
               {revamping ? 'Revamping…' : `Generate v${deck.version + 1}`}
