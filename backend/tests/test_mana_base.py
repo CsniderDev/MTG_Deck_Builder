@@ -353,6 +353,19 @@ def _lands(deck):
     return sum(c.count for c in deck if c.type_line and "Land" in c.type_line or c.name in {"Mountain", "Forest"})
 
 
+def test_modal_double_faced_spell_lands_do_not_count_as_lands():
+    from app.services.deck_builder import _is_land, _land_count
+
+    deck = [
+        _typed("Sink into Stupor // Soporific Springs", "Instant // Land"),
+        _typed("Dryad Arbor", "Land Creature - Forest Dryad"),
+        _typed("Mountain", "Basic Land - Mountain", 33),
+    ]
+    assert not _is_land(deck[0])
+    assert _is_land(deck[1])
+    assert _land_count(deck) == 34  # 33 Mountains + Dryad Arbor; the MDFC is a spell
+
+
 @pytest.mark.asyncio
 async def test_too_few_lands_swaps_last_spells_for_basics():
     deck = [_typed("Red Card", "Sorcery"), _typed("Green Card", "Sorcery")]
@@ -364,9 +377,9 @@ async def test_too_few_lands_swaps_last_spells_for_basics():
 
     names = {c.name for c in deck}
     assert sum(c.count for c in deck) == 99
-    assert _lands(deck) == 34
-    # The 4 cuts come from the end of the spell list; the first spells survive.
-    assert {"Spell 63", "Spell 64", "Spell 65", "Spell 66"}.isdisjoint(names)
+    assert _lands(deck) == 35
+    # The 5 cuts come from the end of the spell list; the first spells survive.
+    assert {"Spell 62", "Spell 63", "Spell 64", "Spell 65", "Spell 66"}.isdisjoint(names)
     assert {"Red Card", "Green Card", "Spell 0"} <= names
     assert any("Deck had only 30 lands" in n and "Spell 66" in n for n in notes)
 

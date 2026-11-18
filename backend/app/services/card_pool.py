@@ -404,7 +404,7 @@ def clamp_targets(raw: Any, deck_size: int) -> dict[str, int]:
             value = DEFAULT_TARGETS[key]
         return max(low, min(high, value))
 
-    targets = {"lands": number("lands", 33, 40)}
+    targets = {"lands": number("lands", 35, 40)}
     for role in FILL_ROLES:
         targets[role] = number(role, 0, 15)
     nonland = deck_size - targets["lands"]

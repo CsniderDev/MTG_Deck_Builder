@@ -60,8 +60,7 @@ Rules:
   removed. Sol Ring and other colorless rocks, and one-shot rituals, are not colored
   sources.
 - Fixing REPLACES basics; it does not add to the land count. Keep the total land count
-  normal for the bracket and curve - usually 35-38 lands (fewer, ~33-34, only with
-  lots of cheap ramp). Count modal double-faced cards with a land side toward it.
+  normal: at least 35 lands, usually 35-38 depending on the curve. Count modal double-faced cards with a land side toward it.
 - Choose the nonbasic lands and mana rocks/dorks first, then use basics to fill
   whatever colors are still short. Example: symbols that are 25% W, 10% U, 15% B,
   40% R, 10% G. With no other fixing, 20 basics split about 5 Plains, 2 Island,
@@ -341,12 +340,12 @@ class LLMService:
             "Plan the deck. Respond ONLY with a JSON object:\n"
             "{\n"
             '  "strategy": "<2-3 sentences: game plan and how it wins>",\n'
-            '  "targets": {"lands": <33-40>, "ramp": <int>, "draw": <int>, "removal": <int>, "wipe": <int>},\n'
+            '  "targets": {"lands": <35-40>, "ramp": <int>, "draw": <int>, "removal": <int>, "wipe": <int>},\n'
             '  "theme_queries": ["<Scryfall search query>", "..."]\n'
             "}\n"
             "Rules:\n"
             "- targets are card counts for a 99-card deck; cards for the theme fill the rest. "
-            "Typical: 35-38 lands, 8-12 ramp, 8-12 draw, 6-10 removal/interaction, 1-4 board wipes. "
+            "Lands: at least 35 (35-38 typical). Typical: 8-12 ramp, 8-12 draw, 6-10 removal/interaction, 1-4 board wipes. "
             "Adjust for the bracket, curve and concept.\n"
             "- theme_queries: 2-4 Scryfall search queries that find cards for THIS deck's theme "
             "and the commander's mechanics, using Scryfall syntax such as o:\"text\" (rules text), "

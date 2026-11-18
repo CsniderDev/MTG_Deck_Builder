@@ -351,21 +351,23 @@ class DeckBuilder:
             explanation = "LLM failed to revamp the deck. The previous decklist was preserved unchanged."
             source = "heuristic"
         else:
+            # Validate the new list AND every card a suggested swap adds - swaps used to
+            # skip validation, so off-color suggestions reached the UI.
+            swap_additions = [
+                added
+                for sub in llm_result.get("substitutions") or []
+                if isinstance(sub, dict)
+                for added in sub.get("added") or []
+                if isinstance(added, dict)
+            ]
             prefetched_cards, invalid_cards = await self.validate_decklist(
-                llm_result.get("decklist") or [], command_zone.get("color_identity", [])
+                list(llm_result.get("decklist") or []) + swap_additions,
+                command_zone.get("color_identity", []),
             )
             if invalid_cards:
-                llm_result = {
-                    **llm_result,
-                    "decklist": [
-                        entry
-                        for entry in llm_result.get("decklist") or []
-                        if isinstance(entry, dict)
-                        and str(entry.get("name") or "").strip().lower() in prefetched_cards
-                    ],
-                    "notes": list(llm_result.get("notes") or [])
-                    + [f"Removed invalid card(s): {', '.join(invalid_cards)}."],
-                }
+                llm_result = _drop_invalid_revamp_cards(
+                    llm_result, prefetched_cards, invalid_cards, previous_payload
+                )
             decklist, explanation, source, notes, substitutions = self._materialize(
                 llm_result,
                 command_zone,
@@ -377,11 +379,22 @@ class DeckBuilder:
             )
         decklist = await self._hydrate_cards(decklist, prefetched_cards)
         if llm_result is not None:
-            # Only rebalance decks the LLM produced; a preserved (failed-revamp) deck is
-            # the user's own list and is returned untouched.
-            decklist = await self._balance_basics(
-                decklist, [c for c in (commander_card, secondary_commander_card) if c], notes
+            # Only adjust decks the LLM produced; a preserved (failed-revamp) deck is the
+            # user's own list and is returned untouched. Cards the revamp just added are
+            # protected when spells must become lands.
+            command_cards = [c for c in (commander_card, secondary_commander_card) if c]
+            just_added = {
+                card.name for sub in substitutions for card in sub.added
+            }
+            decklist = await self._enforce_land_count(
+                decklist,
+                command_cards,
+                {},
+                banned_list | gamechangers,
+                notes,
+                protected=just_added,
             )
+            decklist = await self._balance_basics(decklist, command_cards, notes)
         substitutions = await self._hydrate_substitutions(substitutions, prefetched_cards)
         next_version = (
             request.previous_version + 1
@@ -412,6 +425,7 @@ class DeckBuilder:
         recommendations: dict[str, list[dict[str, Any]]],
         excluded_names: set[str],
         notes: list[str],
+        protected: Optional[set[str]] = None,
     ) -> list[MagicCard]:
         """Keep a built deck between ``_MIN_LANDS`` and ``_MAX_LANDS`` lands (needs hydrated types).
 
@@ -426,7 +440,9 @@ class DeckBuilder:
         lands = _land_count(decklist)
 
         if lands < _MIN_LANDS:
-            added = _swap_spells_for_basics(decklist, identity, _MIN_LANDS - lands, lands, notes)
+            added = _swap_spells_for_basics(
+                decklist, identity, _MIN_LANDS - lands, lands, notes, protected
+            )
             if added:
                 await self._hydrate_cards(added)
             return decklist
@@ -829,17 +845,21 @@ def _normalize_decklist(
 
 
 def _is_land(card: MagicCard) -> bool:
-    """Best-effort land check before/after hydration (type line, then name/category)."""
+    """Best-effort land check before/after hydration (type line, then name/category).
+
+    Only the front face counts: a "Sorcery // Land" modal card is a spell for land-count
+    purposes, so it can't quietly stand in for one of the deck's 35+ real lands.
+    """
     if card.name in _BASIC_NAMES:
         return True
     if card.type_line:
-        return "Land" in card.type_line
+        return "Land" in card.type_line.split("//")[0]
     return "land" in (card.category or "").lower()
 
 
-# A normal Commander land count, MDFCs with a land face included. The LLM is asked
-# for 35-38; these bounds only catch clear outliers.
-_MIN_LANDS = 34
+# Land-count bounds for every LLM-built or LLM-revamped deck (front-face lands only).
+# 35 is the floor; the LLM is asked for 35-38.
+_MIN_LANDS = 35
 _MAX_LANDS = 40
 
 
@@ -853,7 +873,12 @@ def _describe(cards: list[tuple[str, int]]) -> str:
 
 
 def _swap_spells_for_basics(
-    deck: list[MagicCard], identity: set[str], needed: int, lands: int, notes: list[str]
+    deck: list[MagicCard],
+    identity: set[str],
+    needed: int,
+    lands: int,
+    notes: list[str],
+    protected: Optional[set[str]] = None,
 ) -> list[MagicCard]:
     """Replace the last ``needed`` spells with basics; return any new basic entries.
 
@@ -862,10 +887,13 @@ def _swap_spells_for_basics(
     worse one.
     """
     removed: list[tuple[str, int]] = []
+    keep = {name.lower() for name in (protected or set())}
     spells = [card for card in reversed(list(deck)) if not _is_land(card)]
-    non_ramp = [card for card in spells if not card.produced_mana]
-    ramp = [card for card in spells if card.produced_mana]
-    for card in non_ramp + ramp:
+    unprotected = [card for card in spells if card.name.lower() not in keep]
+    non_ramp = [card for card in unprotected if not card.produced_mana]
+    ramp = [card for card in unprotected if card.produced_mana]
+    last_resort = [card for card in spells if card.name.lower() in keep]
+    for card in non_ramp + ramp + last_resort:
         while card.count > 0 and len(removed) < needed:
             card.count -= 1
             removed.append((card.name, 1))
@@ -1274,6 +1302,69 @@ def _heuristic_decklist(
         if len(picks) >= target_nonland:
             break
     return picks
+
+
+def _drop_invalid_revamp_cards(
+    llm_result: dict[str, Any],
+    valid_cards: dict[str, dict[str, Any]],
+    invalid_labels: list[str],
+    previous_payload: list[dict[str, Any]],
+) -> dict[str, Any]:
+    """Remove cards that failed validation from a revamp, reverting any swap that used one.
+
+    A swap whose added card is off-color, banned or unknown is undone as a whole: it is
+    dropped from the suggestions and the card(s) it removed go back into the deck, so the
+    deck isn't left a card short and the UI never offers an illegal swap.
+    """
+    reasons = {}
+    for label in dict.fromkeys(invalid_labels):
+        name, _, reason = label.rpartition(" (")
+        reasons[(name or label).strip().lower()] = reason.rstrip(")") or "invalid"
+
+    def is_valid(entry: Any) -> bool:
+        return isinstance(entry, dict) and str(entry.get("name") or "").strip().lower() in valid_cards
+
+    decklist = [entry for entry in llm_result.get("decklist") or [] if is_valid(entry)]
+    removed_from_list = sorted(
+        {
+            str(entry.get("name"))
+            for entry in llm_result.get("decklist") or []
+            if isinstance(entry, dict) and not is_valid(entry)
+        }
+    )
+    in_deck = {str(entry.get("name") or "").strip().lower() for entry in decklist}
+    previous_by_name = {
+        str(card.get("name") or "").strip().lower(): card for card in previous_payload
+    }
+
+    kept_subs: list[Any] = []
+    reverted: list[str] = []
+    for sub in llm_result.get("substitutions") or []:
+        added = [a for a in (sub.get("added") or []) if isinstance(a, dict)] if isinstance(sub, dict) else []
+        bad = [a for a in added if not is_valid(a)]
+        if not bad:
+            kept_subs.append(sub)
+            continue
+        for card in sub.get("removed") or []:
+            key = str((card or {}).get("name") or "").strip().lower()
+            if key and key not in in_deck and key in previous_by_name:
+                decklist.append(dict(previous_by_name[key]))
+                in_deck.add(key)
+        removed_names = ", ".join(str(c.get("name")) for c in sub.get("removed") or [] if isinstance(c, dict))
+        bad_names = ", ".join(
+            f"{a.get('name')} ({reasons.get(str(a.get('name') or '').strip().lower(), 'invalid')})" for a in bad
+        )
+        reverted.append(f"{removed_names or '(nothing)'} -> {bad_names}")
+
+    notes = list(llm_result.get("notes") or [])
+    if removed_from_list:
+        notes.append(f"Removed invalid card(s) from the list: {', '.join(removed_from_list)}.")
+    if reverted:
+        notes.append(
+            "Reverted swap(s) that added cards outside the deck's color identity or "
+            f"legality, keeping the original card(s): {'; '.join(reverted)}."
+        )
+    return {**llm_result, "decklist": decklist, "substitutions": kept_subs, "notes": notes}
 
 
 def _exploration_note(pool: CardPool, decklist: list[MagicCard]) -> list[str]:

@@ -525,4 +525,80 @@ async def test_revamp_drops_off_color_cards_instead_of_keeping_them():
     names = {c.name for c in result.decklist}
     assert "Sol Ring" in names
     assert "Lightning Bolt" not in names
-    assert any("Lightning Bolt (Color Mismatch)" in note for note in result.notes)
+    assert any("Removed invalid card(s) from the list: Lightning Bolt" in note for note in result.notes)
+
+
+class _OffColorBoltScryfall(_StubScryfall):
+    async def get_collection(self, names, count=True):
+        cards = await super().get_collection(names, count)
+        for card in cards:
+            if card["name"] == "Lightning Bolt":
+                card["color_identity"] = ["R"]
+        return cards
+
+
+@pytest.mark.asyncio
+async def test_revamp_reverts_swaps_that_add_off_color_cards():
+    payload = {
+        # The LLM swapped Old Card -> Lightning Bolt (off-color for Atraxa) and
+        # Other Card -> Sol Ring (fine). Lightning Bolt is not even in its decklist.
+        "decklist": [{"name": "Sol Ring", "count": 1}, {"name": "Keeper", "count": 1}],
+        "explanation": "Revised.",
+        "substitutions": [
+            {
+                "removed": [{"name": "Old Card", "count": 1}],
+                "added": [{"name": "Lightning Bolt", "count": 1}],
+                "explanation": "Burn.",
+            },
+            {
+                "removed": [{"name": "Other Card", "count": 1}],
+                "added": [{"name": "Sol Ring", "count": 1}],
+                "explanation": "Ramp.",
+            },
+        ],
+    }
+    builder = DeckBuilder(_OffColorBoltScryfall(), _StubEDHRec(), _StubLLM(payload))
+    request = RevampDeckRequest(
+        commander="Atraxa",
+        bracket=3,
+        previous_decklist=[
+            MagicCard(name="Old Card", count=1, category="Utility"),
+            MagicCard(name="Other Card", count=1),
+            MagicCard(name="Keeper", count=1),
+        ],
+        change_request="add burn and ramp",
+    )
+    result = await builder.revamp(request)
+    names = {c.name for c in result.decklist}
+    # The illegal swap is gone from the suggestions and its removed card is back.
+    assert [s.added[0].name for s in result.substitutions] == ["Sol Ring"]
+    assert "Old Card" in names and "Lightning Bolt" not in names
+    assert "Other Card" not in names  # the valid swap still happened
+    assert any("Reverted swap(s)" in n and "Old Card -> Lightning Bolt (Color Mismatch)" in n for n in result.notes)
+
+
+@pytest.mark.asyncio
+async def test_revamp_enforces_35_land_floor_without_cutting_just_added_cards():
+    payload = {
+        "decklist": [{"name": f"Card {i}", "count": 1} for i in range(69)]
+        + [{"name": "New Addition", "count": 1}]
+        + [{"name": "Plains", "count": 29}],
+        "explanation": "Revised.",
+        "substitutions": [
+            {"removed": [{"name": "Card 99", "count": 1}], "added": [{"name": "New Addition", "count": 1}], "explanation": "x"}
+        ],
+    }
+    builder = DeckBuilder(_StubScryfall(), _StubEDHRec(), _StubLLM(payload))
+    request = RevampDeckRequest(
+        commander="Atraxa",
+        bracket=3,
+        previous_decklist=[MagicCard(name="Card 99", count=1)],
+        change_request="swap one card",
+    )
+    result = await builder.revamp(request)
+    names = {c.name for c in result.decklist}
+    basics = sum(c.count for c in result.decklist if c.name in {"Plains", "Island", "Swamp", "Forest"})
+    assert sum(c.count for c in result.decklist) == DECK_SIZE
+    assert basics == 35
+    assert "New Addition" in names  # listed last, but protected as a just-added card
+    assert any("Deck had only 29 lands" in n for n in result.notes)
