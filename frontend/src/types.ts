@@ -32,6 +32,8 @@ export interface DeckPlan {
   /** Hard cap on the 99's total price in USD, when the user set one. */
   budget?: number | null;
   avoid_queries?: string[];
+  /** Cards restored by reverting a swap; later revisions keep them. */
+  kept_cards?: string[];
 }
 
 export interface DeckSubstitution {

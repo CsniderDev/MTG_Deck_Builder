@@ -1007,3 +1007,106 @@ def test_costly_swap_keeps_its_job_with_a_cheaper_card_before_being_undone():
     assert "Cheap Removal" in {c.name for c in deck} and "Pricey Removal" not in {c.name for c in deck}
     assert [c.name for c in subs[0].added] == ["Cheap Removal"] and "didn't fit" in subs[0].explanation
     assert any("used cheaper cards that do the same job" in n for n in notes)
+
+
+# --- cards the user kept by reverting a swap ----------------------------------------------
+
+
+class _KeepLLM(_StubLLM):
+    async def revamp_deck(self, **kwargs):
+        self.kwargs = kwargs
+        return {
+            "explanation": "Swapped.",
+            "substitutions": [
+                {"removed": [{"name": "Kept Card"}], "added": [{"name": "Card 70"}], "explanation": "Cut it."},
+                {"removed": [{"name": "Card 0"}], "added": [{"name": "Card 71"}], "explanation": "Fine."},
+            ],
+        }
+
+
+def _keep_deck():
+    return _priced_deck([MagicCard(name="Kept Card", count=1, category="Theme", price="0.10")])
+
+
+@pytest.mark.asyncio
+async def test_revamp_never_removes_a_card_the_user_reverted_back_in():
+    from app.models.schemas import DeckPlan
+
+    llm = _KeepLLM(payload={})
+    builder = DeckBuilder(_PricedScryfall(), _StubEDHRec(), llm)
+    result = await builder.revamp(
+        RevampDeckRequest(
+            commander="Atraxa",
+            bracket=3,
+            previous_decklist=_keep_deck(),
+            change_request="more draw",
+            plan=DeckPlan(strategy="Clones.", kept_cards=["kept card", "Gone Card"]),
+        )
+    )
+    assert llm.kwargs["locked_cards"] == ["Kept Card"]  # told to the model, in deck spelling
+    names = {c.name for c in result.decklist}
+    assert "Kept Card" in names and "Card 70" not in names  # that swap was refused
+    assert "Card 71" in names and "Card 0" not in names  # other swaps still happen
+    assert sum(c.count for c in result.decklist) == 99
+    assert [(s.removed[0].name, s.added[0].name) for s in result.substitutions] == [("Card 0", "Card 71")]
+    assert any("Kept card(s) you restored" in n for n in result.notes)
+    assert result.plan.kept_cards == ["Kept Card"]  # still protected next time; cards gone from the deck drop off
+
+
+@pytest.mark.asyncio
+async def test_naming_a_kept_card_in_the_request_lets_it_be_swapped():
+    from app.models.schemas import DeckPlan
+
+    llm = _KeepLLM(payload={})
+    builder = DeckBuilder(_PricedScryfall(), _StubEDHRec(), llm)
+    result = await builder.revamp(
+        RevampDeckRequest(
+            commander="Atraxa",
+            bracket=3,
+            previous_decklist=_keep_deck(),
+            change_request="Actually, cut Kept Card",
+            plan=DeckPlan(strategy="Clones.", kept_cards=["Kept Card"]),
+        )
+    )
+    assert llm.kwargs["locked_cards"] == []
+    assert "Kept Card" not in {c.name for c in result.decklist}
+    assert result.plan.kept_cards == []
+
+
+@pytest.mark.asyncio
+async def test_budget_enforcement_skips_kept_cards():
+    from app.models.schemas import DeckPlan
+
+    previous = _priced_deck([MagicCard(name="Pricey Ramp", count=1, category="Ramp")])
+    builder = DeckBuilder(_PricedScryfall(), _StubEDHRec(), _StubLLM({"explanation": "x", "substitutions": []}))
+    result = await builder.revamp(
+        RevampDeckRequest(
+            commander="Atraxa",
+            bracket=3,
+            previous_decklist=previous,
+            change_request="tighten it up",
+            plan=DeckPlan(strategy="Ramp.", budget=25.0, kept_cards=["Pricey Ramp"]),
+        )
+    )
+    assert "Pricey Ramp" in {c.name for c in result.decklist}
+    assert any("still over your $25.00 cap" in n for n in result.notes)
+
+
+def test_fit_deck_size_never_trims_a_kept_card():
+    from app.services.deck_builder import _fit_deck_size
+
+    deck = [MagicCard(name=f"S{i}", type_line="Sorcery") for i in range(64)] + [
+        MagicCard(name="Kept", type_line="Sorcery"),
+        MagicCard(name="Mountain", count=35, type_line="Basic Land - Mountain"),
+    ]
+    deck = _fit_deck_size(deck, 99, {"R"}, [], protected={"Kept"})
+    assert sum(c.count for c in deck) == 99 and "Kept" in {c.name for c in deck} and "S63" not in {c.name for c in deck}
+
+
+def test_plan_with_only_kept_cards_adopts_the_inferred_strategy():
+    from app.models.schemas import DeckPlan
+    from app.services.deck_builder import _next_plan
+
+    prior = DeckPlan(kept_cards=["Kept Card"])
+    plan = _next_plan(prior, {"plan": {"changed": False, "strategy": "Go wide.", "theme_queries": ["t:goblin"]}}, [])
+    assert plan.strategy == "Go wide." and plan.theme_queries == ["t:goblin"] and plan.kept_cards == ["Kept Card"]

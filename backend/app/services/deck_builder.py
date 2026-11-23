@@ -386,6 +386,10 @@ class DeckBuilder:
         if budget is None and not removes_budget(request.change_request):
             budget = (prior_plan.budget if prior_plan else None) or parse_budget(request.prompt)
         command_cards = [c for c in (commander_card, secondary_commander_card) if c]
+        # Cards the user brought back by reverting a swap stay in the deck, unless this
+        # change request names one of them (then the user is asking about it directly).
+        kept_cards = _kept_cards(prior_plan, request.previous_decklist)
+        locked = {name for name in kept_cards if name.lower() not in request.change_request.lower()}
         current_total: Optional[float] = None
         if budget is not None:
             priced = [card.model_copy() for card in request.previous_decklist]
@@ -432,6 +436,7 @@ class DeckBuilder:
             budget=budget,
             current_total=current_total,
             avoid_queries=avoid_queries,
+            locked_cards=sorted(locked),
         )
         if llm_result is None:
             llm_failed = True
@@ -462,6 +467,8 @@ class DeckBuilder:
                     "substitutions": _swaps_from_decklist_diff(previous_payload, llm_result["decklist"]),
                 }
             llm_result = {**llm_result, "decklist": [dict(card) for card in previous_payload]}
+            if locked:
+                llm_result = _protect_locked_cards(llm_result, locked)
 
             # Validate the deck AND every card a suggested swap adds - swaps used to
             # skip validation, so off-color suggestions reached the UI.
@@ -514,13 +521,14 @@ class DeckBuilder:
                 {},
                 banned_list | gamechangers,
                 notes,
-                protected=just_added,
+                protected=just_added | locked,
             )
             decklist = _fit_deck_size(
                 decklist,
                 DECK_SIZE_WITH_PARTNER if secondary_commander_card else DECK_SIZE,
                 set(command_zone.get("color_identity") or []),
                 notes,
+                protected=locked,
             )
             decklist = await self._balance_basics(decklist, command_cards, notes)
             if budget is not None:
@@ -549,6 +557,7 @@ class DeckBuilder:
                     command_cards,
                     banned_list | gamechangers,
                     [],
+                    protected=locked,
                 )
                 substitutions = _record_budget_swaps(substitutions, budget_swaps, budget)
                 notes.extend(budget_note(budget, total, budget_swaps))
@@ -572,7 +581,12 @@ class DeckBuilder:
             notes=notes,
             substitutions=substitutions,
             source=source,
-            plan=_with_budget(_next_plan(prior_plan, llm_result, notes), budget),
+            plan=_carry_plan(
+                _next_plan(prior_plan, llm_result, notes),
+                budget,
+                # A kept card stays protected as long as it's in the deck.
+                [name for name in kept_cards if name.lower() in {c.name.lower() for c in decklist}],
+            ),
         )
         self._cache_set(cache_key, response)
         return response
@@ -586,6 +600,7 @@ class DeckBuilder:
         command_cards: list[dict[str, Any]],
         excluded: set[str],
         notes: list[str],
+        protected: Iterable[str] = (),
     ) -> tuple[list[tuple[MagicCard, MagicCard]], float]:
         """Bring the deck under ``budget`` in code, re-checking with hydrated prices.
 
@@ -599,7 +614,12 @@ class DeckBuilder:
         total = deck_total(decklist)
         for _ in range(3):
             swaps, total = enforce_budget(
-                decklist, budget, candidates, identity, excluded=excluded | {c.name.lower() for c, _ in all_swaps}
+                decklist,
+                budget,
+                candidates,
+                identity,
+                excluded=excluded | {c.name.lower() for c, _ in all_swaps},
+                protected=protected,
             )
             if not swaps:
                 break
@@ -1576,7 +1596,11 @@ def _revert_land_cutting_swaps(
 
 
 def _fit_deck_size(
-    decklist: list[MagicCard], target: int, identity: set[str], notes: list[str]
+    decklist: list[MagicCard],
+    target: int,
+    identity: set[str],
+    notes: list[str],
+    protected: Iterable[str] = (),
 ) -> list[MagicCard]:
     """Last-resort size fix after a revision's adjustments, touching basics first.
 
@@ -1587,14 +1611,15 @@ def _fit_deck_size(
     if total == target:
         return decklist
     changed: list[str] = []
+    keep = {name.lower() for name in protected}
     while total > target:
         basics = [c for c in decklist if c.name in _BASIC_NAMES and c.count > 0]
         if basics and _land_count(decklist) > _MIN_LANDS:
             pile = max(basics, key=lambda c: c.count)
         else:
-            pile = next((c for c in reversed(decklist) if not _is_land(c)), None) or max(
-                decklist, key=lambda c: c.count
-            )
+            pile = next(
+                (c for c in reversed(decklist) if not _is_land(c) and c.name.lower() not in keep), None
+            ) or max(decklist, key=lambda c: c.count)
         pile.count -= 1
         changed.append(f"-{pile.name}")
         if pile.count <= 0:
@@ -1834,11 +1859,51 @@ def _reconcile_substitutions(
     return kept
 
 
-def _with_budget(plan: Optional[DeckPlan], budget: Optional[float]) -> Optional[DeckPlan]:
-    """Carry the revision's budget (possibly newly set or lifted) on the plan."""
+def _carry_plan(
+    plan: Optional[DeckPlan], budget: Optional[float], kept_cards: list[str]
+) -> Optional[DeckPlan]:
+    """Carry the revision's budget (possibly newly set or lifted) and kept cards on the plan."""
     if plan is None:
-        return DeckPlan(budget=budget) if budget is not None else None
-    return plan.model_copy(update={"budget": budget})
+        if budget is None and not kept_cards:
+            return None
+        plan = DeckPlan()
+    return plan.model_copy(update={"budget": budget, "kept_cards": kept_cards[:200]})
+
+
+def _kept_cards(plan: Optional[DeckPlan], previous_decklist: list[MagicCard]) -> list[str]:
+    """Kept (reverted-in) card names that are still in the deck, in the deck's spelling."""
+    if plan is None or not plan.kept_cards:
+        return []
+    in_deck = {card.name.lower(): card.name for card in previous_decklist if card.name not in _BASIC_NAMES}
+    names = [in_deck[name.strip().lower()] for name in plan.kept_cards if name.strip().lower() in in_deck]
+    return list(dict.fromkeys(names))
+
+
+def _protect_locked_cards(llm_result: dict[str, Any], locked: set[str]) -> dict[str, Any]:
+    """Take kept cards out of every swap's "removed" list.
+
+    A swap that only removed a kept card is left adding cards with nothing removed, and
+    the uneven-swap handling then drops its additions - so the kept card stays and the
+    deck keeps its size.
+    """
+    keys = {name.lower() for name in locked}
+    blocked: list[str] = []
+    subs = []
+    for sub in llm_result.get("substitutions") or []:
+        if not isinstance(sub, dict):
+            continue
+        removed = [c for c in sub.get("removed") or [] if isinstance(c, dict)]
+        kept = [c for c in removed if str(c.get("name") or "").strip().lower() not in keys]
+        blocked.extend(str(c.get("name")) for c in removed if c not in kept)
+        subs.append({**sub, "removed": kept})
+    if not blocked:
+        return llm_result
+    notes = list(llm_result.get("notes") or [])
+    notes.append(
+        "Kept card(s) you restored by reverting a swap (name them in a request to change "
+        f"them): {', '.join(dict.fromkeys(blocked))}."
+    )
+    return {**llm_result, "substitutions": subs, "notes": notes}
 
 
 def _undo_swap(
@@ -2003,6 +2068,10 @@ def _next_plan(
     queries = sanitize_theme_queries(returned.get("theme_queries"))
     if prior is None:
         return DeckPlan(strategy=strategy, theme_queries=queries) if strategy else None
+    if not prior.strategy.strip():
+        if not strategy:
+            return prior
+        return prior.model_copy(update={"strategy": strategy, "theme_queries": queries or prior.theme_queries})
     if returned.get("changed") is True and strategy:
         notes.append(f"Game plan updated per your request: {strategy}")
         return DeckPlan(

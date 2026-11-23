@@ -74,6 +74,9 @@ class DeckPlan(BaseModel):
     budget: Optional[float] = Field(default=None, ge=0, le=100000)
     # Scryfall searches for themes the concept rules out (kept out of candidate pools).
     avoid_queries: list[str] = Field(default_factory=list, max_length=4)
+    # Cards the user restored by reverting a swap: revisions must keep them unless a
+    # change request names them explicitly.
+    kept_cards: list[str] = Field(default_factory=list, max_length=200)
 
 
 class RevampDeckRequest(BaseModel):

@@ -186,6 +186,12 @@ then `_revert_costly_swaps` replaces an over-budget addition with a cheaper same
 swap), and remaining overage is fixed by `enforce_budget`, shown as "Budget:" swaps. LLM notes that
 state budget totals are dropped; the server reports the real total.
 
+**Reverted cards are kept.** "Revert this swap" (client-side, `applySubstitutionRevert`) adds the
+restored nonbasic cards to `DeckPlan.kept_cards`. Revamp treats them as locked unless the change
+request names the card: the prompt lists them, `_protect_locked_cards` strips them from every swap's
+"removed" list (the now-uneven swap's additions are dropped), and the land floor, `_fit_deck_size` and
+budget enforcement skip them. The returned plan keeps only kept cards still in the deck.
+
 **Plans persist across revisions.** Builds return `DeckResponse.plan` (`DeckPlan`: strategy + theme
 queries); the frontend sends it back as `RevampDeckRequest.plan`. Revamp puts the plan first in the
 prompt, re-runs its theme queries to offer on-theme candidates (`render_theme_candidates`), and keeps

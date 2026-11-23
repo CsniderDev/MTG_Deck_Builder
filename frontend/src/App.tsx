@@ -101,12 +101,26 @@ function applySubstitutionRevert(
     cardsByKey.set(key, cloneMagicCard(baseCard, card.count || 1));
   }
 
+  // Reverting a swap means the user wants those cards: remember them so later
+  // revisions keep them (basics are excluded - their counts get rebalanced anyway).
+  const restoredNames = substitution.removed
+    .map((card) => card.name)
+    .filter((name) => !BASIC_LAND_NAMES.has(name));
+  const droppedKeys = new Set(substitution.added.map((card) => normalizedCardKey(card.name)));
+  const keptCards = [
+    ...(deck.plan?.kept_cards ?? []).filter((name) => !droppedKeys.has(normalizedCardKey(name))),
+    ...restoredNames,
+  ].filter((name, index, all) => all.findIndex((other) => normalizedCardKey(other) === normalizedCardKey(name)) === index);
+
   return {
     ...deck,
     decklist: [...cardsByKey.values()],
     substitutions: deck.substitutions.filter((candidate) => candidate !== substitution),
+    plan: { strategy: '', theme_queries: [], ...deck.plan, kept_cards: keptCards },
   };
 }
+
+const BASIC_LAND_NAMES = new Set(['Plains', 'Island', 'Swamp', 'Mountain', 'Forest', 'Wastes']);
 
 function scrubDecklistCardName(rawName: string): string {
   /** Remove trailing set-code / collector-number decorations from pasted decklist entries. */

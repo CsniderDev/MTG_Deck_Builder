@@ -201,6 +201,16 @@ describe('App', () => {
     expect(screen.getByText(/Cultivate/)).toBeInTheDocument();
     expect(screen.queryByText(/LLM substitutions/i)).not.toBeInTheDocument();
     expect(screen.getByText(/v2/)).toBeInTheDocument();
+
+    // The next revision tells the server to keep the card the user reverted back in.
+    await user.type(screen.getByPlaceholderText(/swap out the infinite combos/i), 'more draw');
+    await user.click(screen.getByRole('button', { name: /generate v3/i }));
+    const revampBodies = globalThis.fetch.mock.calls
+      .filter(([input]) => urlOf(input) === '/api/decks/revamp')
+      .map(([, init]) => JSON.parse(init.body));
+    expect(revampBodies).toHaveLength(2);
+    expect(revampBodies[1].plan.kept_cards).toEqual(['Cultivate']);
+    expect(revampBodies[1].previous_decklist.map((card) => card.name)).toContain('Cultivate');
   });
 
   it('keeps the revamp prompt when the returned deck is unchanged', async () => {

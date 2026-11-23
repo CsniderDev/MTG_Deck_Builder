@@ -475,6 +475,7 @@ class LLMService:
         budget: Optional[float] = None,
         current_total: Optional[float] = None,
         avoid_queries: Optional[Iterable[str]] = None,
+        locked_cards: Optional[Iterable[str]] = None,
     ) -> Optional[dict[str, Any]]:
         """Ask the LLM to revise an existing decklist and explain each substitution.
 
@@ -486,6 +487,13 @@ class LLMService:
         gc_block = _gamechanger_block(gamechanger_limit, gamechangers)
         compact_previous_decklist = _compact_decklist_for_prompt(
             previous_decklist, include_prices=budget is not None
+        )
+        locked = [name for name in (locked_cards or []) if name]
+        locked_line = (
+            "KEEP THESE CARDS - the user restored them by reverting earlier swaps, so never put "
+            f"them in a \"removed\" list: {', '.join(locked)}\n"
+            if locked
+            else ""
         )
         avoid = [q for q in (avoid_queries or []) if q]
         avoid_line = (
@@ -515,6 +523,7 @@ class LLMService:
             f"CORE GAME PLAN (keep it unless the change request explicitly asks to change it): {plan_line}\n"
             f"Original user concept (a hard requirement): {user_prompt or '(none)'}\n"
             f"{avoid_line}"
+            f"{locked_line}"
             f"{budget_instructions(budget, current_total)}"
             f"User change request: {change_request}\n\n"
             "How to revise:\n"

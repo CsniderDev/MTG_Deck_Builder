@@ -187,6 +187,7 @@ def enforce_budget(
     identity: set[str],
     excluded: Iterable[str] = (),
     max_lands: int = 40,
+    protected: Iterable[str] = (),
 ) -> tuple[list[tuple[MagicCard, MagicCard]], float]:
     """Swap the most expensive cards for cheaper ones until the deck fits the budget.
 
@@ -210,6 +211,7 @@ def enforce_budget(
     colors = [c for c in "WUBRG" if c in identity] or ["C"]
     per_card = budget / 99
     swaps: list[tuple[MagicCard, MagicCard]] = []
+    keep = {name.strip().lower() for name in protected}
 
     for _ in range(200):
         if total <= budget:
@@ -217,7 +219,10 @@ def enforce_budget(
         lands = sum(max(1, c.count or 1) for c in decklist if _is_land(c))
         # Priciest single copies first; basics are already as cheap as cards get.
         priced = sorted(
-            (c for c in decklist if c.name not in _BASIC_NAMES and (price_of(c) or 0) > 0),
+            (
+                c for c in decklist
+                if c.name not in _BASIC_NAMES and (price_of(c) or 0) > 0 and c.name.lower() not in keep
+            ),
             key=lambda c: price_of(c) or 0,
             reverse=True,
         )
