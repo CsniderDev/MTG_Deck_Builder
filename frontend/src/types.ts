@@ -34,6 +34,10 @@ export interface DeckPlan {
   avoid_queries?: string[];
   /** Cards restored by reverting a swap; later revisions keep them. */
   kept_cards?: string[];
+  /** Cards removed by a revision or by reverting the swap that added them; later revisions don't re-add them. */
+  cut_cards?: string[];
+  /** The deck concept as changed by later revisions (new subtheme or game plan). */
+  concept?: string;
 }
 
 export interface DeckSubstitution {

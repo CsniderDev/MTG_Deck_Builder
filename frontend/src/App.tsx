@@ -110,14 +110,28 @@ function applySubstitutionRevert(
   const keptCards = [
     ...(deck.plan?.kept_cards ?? []).filter((name) => !droppedKeys.has(normalizedCardKey(name))),
     ...restoredNames,
-  ].filter((name, index, all) => all.findIndex((other) => normalizedCardKey(other) === normalizedCardKey(name)) === index);
+  ].filter(uniqueByCardKey);
+  // ...and the cards the reverted swap had added are unwanted: later revisions must
+  // not suggest them again. Restored cards are no longer "cut".
+  const restoredKeys = new Set(restoredNames.map(normalizedCardKey));
+  const rejectedNames = substitution.added
+    .map((card) => card.name)
+    .filter((name) => !BASIC_LAND_NAMES.has(name));
+  const cutCards = [
+    ...(deck.plan?.cut_cards ?? []).filter((name) => !restoredKeys.has(normalizedCardKey(name))),
+    ...rejectedNames,
+  ].filter(uniqueByCardKey);
 
   return {
     ...deck,
     decklist: [...cardsByKey.values()],
     substitutions: deck.substitutions.filter((candidate) => candidate !== substitution),
-    plan: { strategy: '', theme_queries: [], ...deck.plan, kept_cards: keptCards },
+    plan: { strategy: '', theme_queries: [], ...deck.plan, kept_cards: keptCards, cut_cards: cutCards },
   };
+}
+
+function uniqueByCardKey(name: string, index: number, all: string[]): boolean {
+  return all.findIndex((other) => normalizedCardKey(other) === normalizedCardKey(name)) === index;
 }
 
 const BASIC_LAND_NAMES = new Set(['Plains', 'Island', 'Swamp', 'Mountain', 'Forest', 'Wastes']);

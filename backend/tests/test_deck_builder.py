@@ -668,7 +668,9 @@ async def test_build_returns_its_plan_and_revamp_sends_it_back_with_theme_candid
     # Theme candidates come from the plan's searches and skip cards already in the deck.
     assert "Card 2" in llm.revamp_kwargs["theme_candidates"]
     assert "Card 1 " not in llm.revamp_kwargs["theme_candidates"]
-    assert revised.plan == built.plan  # not explicitly changed, so the plan is kept
+    # Not explicitly changed, so the plan is kept; the swapped-out card is recorded as cut.
+    assert revised.plan.model_copy(update={"cut_cards": []}) == built.plan
+    assert revised.plan.cut_cards == ["Card 1"]
 
 
 # --- swaps must match the deck ------------------------------------------------------------
@@ -1110,3 +1112,204 @@ def test_plan_with_only_kept_cards_adopts_the_inferred_strategy():
     prior = DeckPlan(kept_cards=["Kept Card"])
     plan = _next_plan(prior, {"plan": {"changed": False, "strategy": "Go wide.", "theme_queries": ["t:goblin"]}}, [])
     assert plan.strategy == "Go wide." and plan.theme_queries == ["t:goblin"] and plan.kept_cards == ["Kept Card"]
+
+
+# --- cards the user removed stay out; theme changes in revisions --------------------------
+
+
+class _SwapLLM(_StubLLM):
+    """Revamp stub returning fixed swaps; ``direction`` answers the revision-planning step."""
+
+    def __init__(self, swaps, direction=None):
+        super().__init__(payload={})
+        self._swaps = swaps
+        self._direction = direction
+        self.plan_revision_calls = 0
+
+    async def plan_revision(self, **kwargs):
+        self.plan_revision_calls += 1
+        self.plan_revision_kwargs = kwargs
+        return self._direction
+
+    async def revamp_deck(self, **kwargs):
+        self.kwargs = kwargs
+        return {"explanation": "Swapped.", "substitutions": [dict(s) for s in self._swaps]}
+
+
+def _own_deck():
+    """A 99-card deck whose spells aren't in the stub's search results (so stand-ins exist)."""
+    spells = [MagicCard(name=f"Deck Card {i}", count=1, category="Theme", price="0.10") for i in range(60)]
+    return spells + [MagicCard(name="Forest", count=39, category="Land", price="0.25")]
+
+
+def _swap(removed, added):
+    return {"removed": [{"name": removed}], "added": [{"name": added}], "explanation": "x"}
+
+
+@pytest.mark.asyncio
+async def test_revamp_never_re_adds_a_card_the_user_removed_earlier():
+    from app.models.schemas import DeckPlan
+
+    llm = _SwapLLM([_swap("Deck Card 0", "Card 70")])
+    builder = DeckBuilder(_PricedScryfall(), _StubEDHRec(), llm)
+    result = await builder.revamp(
+        RevampDeckRequest(
+            commander="Atraxa",
+            bracket=3,
+            previous_decklist=_own_deck(),
+            change_request="more draw",
+            plan=DeckPlan(strategy="Artifacts.", cut_cards=["Card 70"]),
+        )
+    )
+    assert llm.kwargs["cut_cards"] == ["Card 70"]  # the model is told
+    names = {c.name for c in result.decklist}
+    assert "Card 70" not in names and "Deck Card 0" not in names  # the swap still happens...
+    assert len(result.substitutions) == 1 and result.substitutions[0].added[0].name != "Card 70"
+    assert sum(c.count for c in result.decklist) == 99
+    assert any("Kept out card(s) you removed" in n for n in result.notes)
+    assert result.plan.cut_cards == ["Card 70", "Deck Card 0"]  # ...and its removal is remembered too
+
+
+@pytest.mark.asyncio
+async def test_naming_a_cut_card_lets_it_come_back():
+    from app.models.schemas import DeckPlan
+
+    llm = _SwapLLM([_swap("Deck Card 0", "Card 70")])
+    builder = DeckBuilder(_PricedScryfall(), _StubEDHRec(), llm)
+    result = await builder.revamp(
+        RevampDeckRequest(
+            commander="Atraxa",
+            bracket=3,
+            previous_decklist=_own_deck(),
+            change_request="bring back Card 70",
+            plan=DeckPlan(strategy="Artifacts.", cut_cards=["Card 70"]),
+        )
+    )
+    assert llm.kwargs["cut_cards"] == []
+    assert "Card 70" in {c.name for c in result.decklist}
+    assert result.plan.cut_cards == ["Deck Card 0"]
+
+
+@pytest.mark.asyncio
+async def test_revamp_removes_cards_the_user_asked_to_cut_even_if_the_model_kept_them():
+    llm = _SwapLLM([_swap("Deck Card 9", "Card 71")])
+    builder = DeckBuilder(_PricedScryfall(), _StubEDHRec(), llm)
+    result = await builder.revamp(
+        RevampDeckRequest(
+            commander="Atraxa",
+            bracket=3,
+            previous_decklist=_own_deck(),
+            change_request="Please cut Deck Card 5 and Deck Card 6, and add more draw",
+        )
+    )
+    assert llm.kwargs["requested_cuts"] == ["Deck Card 5", "Deck Card 6"]
+    names = {c.name for c in result.decklist}
+    assert {"Deck Card 5", "Deck Card 6", "Deck Card 9"}.isdisjoint(names)
+    assert sum(c.count for c in result.decklist) == 99
+    removed = sorted(s.removed[0].name for s in result.substitutions)
+    assert removed == ["Deck Card 5", "Deck Card 6", "Deck Card 9"]
+    assert set(result.plan.cut_cards) == {"Deck Card 5", "Deck Card 6", "Deck Card 9"}
+
+
+def test_requested_cuts_reads_removal_wording():
+    from app.services.deck_builder import _requested_cuts
+
+    deck = ["Sol Ring", "Arcane Signet", "Cultivate", "Mana Crypt", "Rhystic Study", "Opt", "Forest"]
+    text = (
+        "Replace Sol Ring with Arcane Signet, keep Cultivate. Mana Crypt has to go; "
+        "I don't want Rhystic Study. Add Opt. Cut a Forest."
+    )
+    assert _requested_cuts(text, deck) == ["Sol Ring", "Mana Crypt", "Rhystic Study"]
+    assert _requested_cuts("more removal please", deck) == []
+
+
+@pytest.mark.asyncio
+async def test_revamp_adds_a_subtheme_with_new_candidates_and_an_updated_plan():
+    from app.models.schemas import DeckPlan
+
+    direction = {
+        "change": "subtheme",
+        "concept": "Clones, plus a treasure subtheme.",
+        "strategy": "Copy the commander; make treasure to ramp.",
+        "theme_queries": ['o:"create a treasure"'],
+        "avoid_queries": ["t:god"],
+        "swap_target": 10,
+    }
+    llm = _SwapLLM([_swap("Deck Card 0", "Card 70")], direction=direction)
+    scryfall = _PricedScryfall()
+    builder = DeckBuilder(scryfall, _StubEDHRec(), llm)
+    result = await builder.revamp(
+        RevampDeckRequest(
+            commander="Atraxa",
+            bracket=3,
+            prompt="clones",
+            previous_decklist=_own_deck(),
+            change_request="add a small treasure subtheme",
+            plan=DeckPlan(strategy="Copy the commander.", theme_queries=["otag:clone"], avoid_queries=["t:god"]),
+        )
+    )
+    assert llm.plan_revision_calls == 1
+    assert llm.kwargs["direction"]["change"] == "subtheme"
+    assert llm.kwargs["plan_strategy"] == "Copy the commander; make treasure to ramp."
+    assert llm.kwargs["user_prompt"] == "Clones, plus a treasure subtheme."
+    assert any('o:"create a treasure"' in q for q in scryfall.searches)  # candidates for the subtheme
+    assert llm.kwargs["theme_candidates"]
+    assert result.plan.strategy == "Copy the commander; make treasure to ramp."
+    assert result.plan.theme_queries == ['o:"create a treasure"', "otag:clone"]
+    assert result.plan.concept == "Clones, plus a treasure subtheme."
+    assert any("Added a subtheme" in n for n in result.notes)
+
+
+@pytest.mark.asyncio
+async def test_revamp_replaces_the_plan_when_asked():
+    from app.models.schemas import DeckPlan
+
+    direction = {
+        "change": "new_plan",
+        "concept": "Go-wide tokens.",
+        "strategy": "Make lots of tokens and pump them.",
+        "theme_queries": ['o:"create" o:"token"'],
+        "avoid_queries": ["otag:clone"],
+    }
+    llm = _SwapLLM([_swap("Deck Card 0", "Card 70")], direction=direction)
+    builder = DeckBuilder(_PricedScryfall(), _StubEDHRec(), llm)
+    result = await builder.revamp(
+        RevampDeckRequest(
+            commander="Atraxa",
+            bracket=3,
+            prompt="clones",
+            previous_decklist=_own_deck(),
+            change_request="switch it to a tokens deck instead",
+            plan=DeckPlan(strategy="Copy the commander.", theme_queries=["otag:clone"], budget=200.0),
+        )
+    )
+    assert result.plan.theme_queries == ['o:"create" o:"token"']
+    assert result.plan.avoid_queries == ["otag:clone"] and result.plan.budget == 200.0
+    assert any("Game plan changed" in n for n in result.notes)
+
+
+@pytest.mark.asyncio
+async def test_plain_requests_skip_the_planning_step_and_keep_the_plan():
+    from app.models.schemas import DeckPlan
+
+    plan = DeckPlan(strategy="Copy the commander.", theme_queries=["otag:clone"])
+    llm = _SwapLLM([], direction={"change": "none", "strategy": "x"})
+    builder = DeckBuilder(_PricedScryfall(), _StubEDHRec(), llm)
+    await builder.revamp(
+        RevampDeckRequest(
+            commander="Atraxa", bracket=3, previous_decklist=_own_deck(), change_request="more removal", plan=plan
+        )
+    )
+    assert llm.plan_revision_calls == 0
+    # A theme-ish request that the planner says changes nothing keeps the plan too.
+    result = await builder.revamp(
+        RevampDeckRequest(
+            commander="Atraxa",
+            bracket=3,
+            previous_decklist=_own_deck(),
+            change_request="more synergy with the commander",
+            plan=plan,
+        )
+    )
+    assert llm.plan_revision_calls == 1 and llm.kwargs["direction"] is None
+    assert result.plan.strategy == "Copy the commander." and result.plan.theme_queries == ["otag:clone"]

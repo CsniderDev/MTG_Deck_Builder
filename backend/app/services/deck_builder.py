@@ -52,6 +52,7 @@ from .budget import (
     parse_budget,
     price_of,
     removes_budget,
+    replacement_for,
     strip_llm_budget_claims,
 )
 from .llm import LLMService
@@ -378,8 +379,36 @@ class DeckBuilder:
         # on-theme candidates from the plan's theme searches so additions fit the deck
         # instead of drifting toward generic staples.
         prior_plan = request.plan
-        theme_queries = sanitize_theme_queries(prior_plan.theme_queries) if prior_plan else []
+        theme_queries = (
+            sanitize_theme_queries(prior_plan.theme_queries, limit=MAX_PLAN_QUERIES) if prior_plan else []
+        )
         avoid_queries = sanitize_theme_queries(prior_plan.avoid_queries)[:3] if prior_plan else []
+        plan_strategy = prior_plan.strategy if prior_plan else ""
+        concept = (prior_plan.concept.strip() if prior_plan else "") or request.prompt
+        change_request = request.change_request or ""
+        # A request that adds a subtheme or changes the game plan gets a planning step
+        # first, so the new theme has real candidates and the old plan stops fighting it.
+        direction: Optional[dict[str, Any]] = None
+        if self._llm.enabled and _wants_direction_change(change_request):
+            direction = _parse_direction(
+                await self._llm.plan_revision(
+                    commander=command_zone,
+                    concept=concept,
+                    plan_strategy=plan_strategy,
+                    theme_queries=theme_queries,
+                    avoid_queries=avoid_queries,
+                    change_request=change_request,
+                ),
+                change_request,
+            )
+        pool_queries = theme_queries
+        if direction is not None:
+            # The candidates offered are the NEW theme's; the old plan's cards are mostly
+            # in the deck already.
+            pool_queries = direction["theme_queries"]
+            avoid_queries = [q for q in direction["avoid_queries"] if q not in pool_queries]
+            plan_strategy = direction["strategy"]
+            concept = direction["concept"]
         # The budget is a hard cap that carries across revisions; a change request can set
         # a new one ("get it under $75") or lift it ("ignore the budget").
         budget = parse_budget(request.change_request)
@@ -389,7 +418,14 @@ class DeckBuilder:
         # Cards the user brought back by reverting a swap stay in the deck, unless this
         # change request names one of them (then the user is asking about it directly).
         kept_cards = _kept_cards(prior_plan, request.previous_decklist)
-        locked = {name for name in kept_cards if name.lower() not in request.change_request.lower()}
+        locked = {name for name in kept_cards if not _mentions(change_request, name)}
+        # Cards the user took out earlier (or whose swap they reverted) stay out, unless
+        # this request names them.
+        prior_cut = list(prior_plan.cut_cards) if prior_plan else []
+        cut_block = {name.strip().lower() for name in prior_cut if not _mentions(change_request, name)}
+        requested_cuts = _requested_cuts(
+            change_request, [card.name for card in request.previous_decklist]
+        )
         current_total: Optional[float] = None
         if budget is not None:
             priced = [card.model_copy() for card in request.previous_decklist]
@@ -401,23 +437,30 @@ class DeckBuilder:
             ]
         theme_candidates = ""
         theme_pool: Optional[CardPool] = None
-        if theme_queries or budget is not None:
-            # Budget revisions also need cheap role cards (ramp, draw, removal...) to
-            # replace expensive ones, which the pool's base searches provide.
-            theme_pool = await build_card_pool(
-                self._scryfall,
-                command_cards,
-                {},
-                theme_queries,
-                banned_list,
-                gamechangers or {name.lower() for name in GAMECHANGERS},
-                limit,
-                max_card_price=card_price_cap(budget),
-                avoid_queries=avoid_queries,
-            )
+
+        async def get_pool() -> CardPool:
+            # Candidates for theme suggestions, budget swaps, and stand-ins for cards the
+            # user asked to cut or that may not come back. Role searches (ramp, draw,
+            # removal...) are always included.
+            nonlocal theme_pool
+            if theme_pool is None:
+                theme_pool = await build_card_pool(
+                    self._scryfall,
+                    command_cards,
+                    {},
+                    pool_queries,
+                    banned_list,
+                    gamechangers or {name.lower() for name in GAMECHANGERS},
+                    limit,
+                    max_card_price=card_price_cap(budget),
+                    avoid_queries=avoid_queries,
+                )
+            return theme_pool
+
+        if pool_queries or budget is not None:
             theme_candidates = render_theme_candidates(
-                theme_pool,
-                {card.name for card in request.previous_decklist},
+                await get_pool(),
+                {card.name for card in request.previous_decklist} | cut_block,
                 include_prices=budget is not None,
             )
 
@@ -425,18 +468,21 @@ class DeckBuilder:
             commander=command_zone,
             bracket=request.bracket,
             bracket_description=bracket_desc,
-            user_prompt=request.prompt,
+            user_prompt=concept,
             previous_decklist=previous_payload,
-            change_request=request.change_request,
+            change_request=change_request,
             gamechanger_limit=limit,
             gamechangers=gamechangers,
             banned_list=banned_list,
-            plan_strategy=prior_plan.strategy if prior_plan else "",
+            plan_strategy=plan_strategy,
             theme_candidates=theme_candidates,
             budget=budget,
             current_total=current_total,
             avoid_queries=avoid_queries,
             locked_cards=sorted(locked),
+            cut_cards=sorted(name for name in prior_cut if name.strip().lower() in cut_block),
+            requested_cuts=requested_cuts,
+            direction=direction,
         )
         if llm_result is None:
             llm_failed = True
@@ -487,6 +533,17 @@ class DeckBuilder:
                 llm_result = _drop_invalid_revamp_cards(
                     llm_result, prefetched_cards, invalid_cards, previous_payload
                 )
+            if cut_block and _adds_any(llm_result, cut_block):
+                llm_result = _replace_blocked_additions(
+                    llm_result,
+                    cut_block,
+                    (await get_pool()).cards,
+                    {str(e.get("name") or "").strip().lower() for e in previous_payload}
+                    | banned_list
+                    | gamechangers,
+                    prefetched_cards,
+                    card_price_cap(budget),
+                )
             llm_result = _apply_listed_swaps(
                 llm_result,
                 previous_payload,
@@ -507,6 +564,24 @@ class DeckBuilder:
             # user's own list and is returned untouched. Cards the revamp just added are
             # protected when spells must become lands.
             command_cards = [c for c in (commander_card, secondary_commander_card) if c]
+            # Cards the user explicitly asked to remove go, even if the model kept them.
+            ignored = {name.lower() for name in requested_cuts} & {c.name.lower() for c in decklist}
+            forced: list[DeckSubstitution] = []
+            if ignored:
+                pool = await get_pool()
+                forced = _force_requested_cuts(
+                    decklist,
+                    ignored,
+                    pool.cards,
+                    {c.name.lower() for c in decklist} | cut_block | banned_list | gamechangers,
+                    card_price_cap(budget),
+                    notes,
+                )
+                if forced:
+                    await self._hydrate_cards(
+                        [sub.added[0] for sub in forced], {c.key: c.data for c in pool.cards}
+                    )
+                    substitutions = list(substitutions) + forced
             # Below the land floor because a swap traded a land for a spell? Undo that
             # swap first, rather than cutting an unrelated spell the user never saw.
             decklist, substitutions = _revert_land_cutting_swaps(
@@ -519,7 +594,7 @@ class DeckBuilder:
                 decklist,
                 command_cards,
                 {},
-                banned_list | gamechangers,
+                banned_list | gamechangers | cut_block,
                 notes,
                 protected=just_added | locked,
             )
@@ -538,15 +613,18 @@ class DeckBuilder:
                 # same job - each shown as a swap.
                 pool_cards = theme_pool.cards if theme_pool else []
                 pool_data = {card.key: card.data for card in pool_cards}
-                decklist, substitutions, stand_ins = _revert_costly_swaps(
+                # Swaps that cut a card the user asked to remove are never undone.
+                forced_ids = {id(sub) for sub in forced}
+                decklist, undoable, stand_ins = _revert_costly_swaps(
                     decklist,
-                    substitutions,
+                    [sub for sub in substitutions if id(sub) not in forced_ids],
                     prefetched_cards,
                     budget,
                     notes,
                     candidates=pool_cards,
-                    excluded=banned_list | gamechangers,
+                    excluded=banned_list | gamechangers | cut_block,
                 )
+                substitutions = undoable + [sub for sub in substitutions if id(sub) in forced_ids]
                 if stand_ins:
                     await self._hydrate_cards(stand_ins, pool_data)
                 budget_swaps, total = await self._apply_budget(
@@ -555,7 +633,7 @@ class DeckBuilder:
                     pool_cards,
                     pool_data,
                     command_cards,
-                    banned_list | gamechangers,
+                    banned_list | gamechangers | cut_block,
                     [],
                     protected=locked,
                 )
@@ -569,6 +647,7 @@ class DeckBuilder:
             else request.previous_version
         )
 
+        final_keys = {card.name.lower() for card in decklist}
         response = DeckResponse(
             version=next_version,
             commander=_to_card(commander_card),
@@ -582,10 +661,13 @@ class DeckBuilder:
             substitutions=substitutions,
             source=source,
             plan=_carry_plan(
-                _next_plan(prior_plan, llm_result, notes),
+                _direction_plan(prior_plan, direction, notes)
+                if direction is not None and llm_result is not None
+                else _next_plan(prior_plan, llm_result, notes),
                 budget,
                 # A kept card stays protected as long as it's in the deck.
-                [name for name in kept_cards if name.lower() in {c.name.lower() for c in decklist}],
+                [name for name in kept_cards if name.lower() in final_keys],
+                _next_cut_cards(prior_cut, substitutions, requested_cuts, final_keys),
             ),
         )
         self._cache_set(cache_key, response)
@@ -1860,14 +1942,287 @@ def _reconcile_substitutions(
 
 
 def _carry_plan(
-    plan: Optional[DeckPlan], budget: Optional[float], kept_cards: list[str]
+    plan: Optional[DeckPlan],
+    budget: Optional[float],
+    kept_cards: list[str],
+    cut_cards: Optional[list[str]] = None,
 ) -> Optional[DeckPlan]:
-    """Carry the revision's budget (possibly newly set or lifted) and kept cards on the plan."""
+    """Carry the revision's budget (possibly newly set or lifted), kept and cut cards on the plan."""
+    cut_cards = cut_cards or []
     if plan is None:
-        if budget is None and not kept_cards:
+        if budget is None and not kept_cards and not cut_cards:
             return None
         plan = DeckPlan()
-    return plan.model_copy(update={"budget": budget, "kept_cards": kept_cards[:200]})
+    return plan.model_copy(
+        update={
+            "budget": budget,
+            "kept_cards": kept_cards[:200],
+            "cut_cards": cut_cards[-MAX_CUT_CARDS:],
+        }
+    )
+
+
+MAX_PLAN_QUERIES = 6  # a plan's own theme searches plus a revision's subtheme searches
+MAX_CUT_CARDS = 300
+
+# Words that suggest a change request is about the deck's theme or direction. A match
+# only triggers the (cheap) planning step, which decides whether anything changes.
+_DIRECTION_WORDS = re.compile(
+    r"\b(sub-?themes?|themes?|themed|archetype|strateg\w*|game ?plan|direction|pivot\w*|"
+    r"switch\w*|lean\w* (?:more |harder |heavily )?(?:in|into|towards?)|focus\w* (?:more )?on|"
+    r"build (?:it |this )?around|turn (?:it|this|the deck) into|make (?:it|this|the deck) (?:a|an|more)|"
+    r"synerg\w*|tribal|typal|package|splash\w*|matters)\b",
+    re.I,
+)
+
+
+def _wants_direction_change(text: str) -> bool:
+    return bool(_DIRECTION_WORDS.search(text or ""))
+
+
+def _parse_direction(raw: Any, change_request: str) -> Optional[dict[str, Any]]:
+    """The planning step's answer when it adds a subtheme or a new plan, else None."""
+    if not isinstance(raw, dict):
+        return None
+    change = re.sub(r"[\s-]+", "_", str(raw.get("change") or "").strip().lower())
+    if change not in ("subtheme", "new_plan"):
+        return None
+    strategy = " ".join(str(raw.get("strategy") or "").split())[:2000]
+    if not strategy:
+        return None
+    queries = sanitize_theme_queries(raw.get("theme_queries"), limit=3) or fallback_theme_queries(
+        change_request
+    )[:3]
+    try:
+        swap_target = max(0, min(40, int(raw.get("swap_target") or 0)))
+    except (TypeError, ValueError):
+        swap_target = 0
+    return {
+        "change": change,
+        "strategy": strategy,
+        "concept": " ".join(str(raw.get("concept") or "").split())[:2000] or strategy,
+        "theme_queries": queries,
+        "avoid_queries": sanitize_theme_queries(raw.get("avoid_queries"))[:3],
+        "swap_target": swap_target,
+    }
+
+
+def _direction_plan(
+    prior: Optional[DeckPlan], direction: dict[str, Any], notes: list[str]
+) -> DeckPlan:
+    """The plan after a revision that added a subtheme or changed the game plan."""
+    new_queries = list(direction["theme_queries"])
+    if direction["change"] == "subtheme":
+        queries = list(dict.fromkeys(new_queries + list(prior.theme_queries if prior else [])))
+        notes.append(f"Added a subtheme to the game plan: {direction['strategy']}")
+    else:
+        queries = new_queries
+        notes.append(f"Game plan changed per your request: {direction['strategy']}")
+    base = prior or DeckPlan()
+    return base.model_copy(
+        update={
+            "strategy": direction["strategy"],
+            "concept": direction["concept"],
+            "theme_queries": queries[:MAX_PLAN_QUERIES],
+            "avoid_queries": [q for q in direction["avoid_queries"] if q not in queries][:3],
+        }
+    )
+
+
+def _card_aliases(name: str) -> list[str]:
+    """A card's full name plus, for double-faced cards, its front face's name."""
+    name = name.strip()
+    aliases = [name]
+    if " // " in name:
+        aliases.append(name.split(" // ")[0].strip())
+    return [a for a in aliases if a]
+
+
+def _name_pattern(name: str) -> re.Pattern[str]:
+    return re.compile(r"(?<![\w'])" + re.escape(name) + r"(?![\w'])", re.I)
+
+
+def _mentions(text: str, name: str) -> bool:
+    """Whether ``text`` names the card (whole words, case-insensitive)."""
+    return bool(text) and any(_name_pattern(alias).search(text) for alias in _card_aliases(name))
+
+
+_CUT_WORDS = re.compile(
+    r"\b(remove|removing|cut|cutting|drop|dropping|replace|replacing|swap(?:ping)? out|"
+    r"take out|taking out|get rid of|getting rid of|ditch|ditching|no more|without|axe|"
+    r"don'?t want|do not want|don'?t like|do not like|instead of)\b",
+    re.I,
+)
+_ADD_WORDS = re.compile(
+    r"\b(add|adding|include|including|keep|keeping|bring back|put in|with|for|more|want|"
+    r"use|using|like)\b",
+    re.I,
+)
+_CUT_AFTER = re.compile(r"^[\s,]*(?:(?:needs?|has|have) to go|(?:should|must|can) go|is out)\b", re.I)
+
+
+def _requested_cuts(text: str, deck_names: Iterable[str]) -> list[str]:
+    """Deck cards the change request asks to remove ("cut Sol Ring", "replace X with Y").
+
+    A card counts when the nearest instruction word before it in its sentence is a
+    removal word (remove, cut, replace, swap out...), or it is followed by "has to go".
+    """
+    if not text:
+        return []
+    names = sorted(
+        {n.strip() for n in deck_names if n and n.strip() not in _BASIC_NAMES}, key=len, reverse=True
+    )
+    cuts: list[tuple[int, int, str]] = []
+    for index, sentence in enumerate(re.split(r"[.!?;\n]+", text)):
+        taken: list[tuple[int, int]] = []
+        for name in names:
+            for alias in _card_aliases(name):
+                match = _name_pattern(alias).search(sentence)
+                if match is None or any(s < match.end() and match.start() < e for s, e in taken):
+                    continue
+                taken.append(match.span())
+                before = sentence[: match.start()]
+                cut_at = max((m.end() for m in _CUT_WORDS.finditer(before)), default=-1)
+                add_at = max((m.end() for m in _ADD_WORDS.finditer(before)), default=-1)
+                if (cut_at >= 0 and cut_at >= add_at) or _CUT_AFTER.match(sentence[match.end():]):
+                    cuts.append((index, match.start(), name))
+                break
+    return list(dict.fromkeys(name for _, _, name in sorted(cuts)))
+
+
+def _adds_any(llm_result: dict[str, Any], keys: set[str]) -> bool:
+    return any(
+        str(card.get("name") or "").strip().lower() in keys
+        for sub in llm_result.get("substitutions") or []
+        if isinstance(sub, dict)
+        for card in sub.get("added") or []
+        if isinstance(card, dict)
+    )
+
+
+def _replace_blocked_additions(
+    llm_result: dict[str, Any],
+    blocked: set[str],
+    candidates: list[Any],
+    unavailable: set[str],
+    card_data: dict[str, dict[str, Any]],
+    max_price: Optional[float],
+) -> dict[str, Any]:
+    """Swap out suggested additions of cards the user removed earlier.
+
+    Each one is replaced by a candidate doing the same job (so the swap the user asked
+    for still happens); with no candidate the addition is dropped, and the uneven-swap
+    handling then puts the removed card back.
+    """
+    taken = set(unavailable) | blocked
+    for sub in llm_result.get("substitutions") or []:
+        if isinstance(sub, dict):
+            taken.update(
+                str(c.get("name") or "").strip().lower() for c in sub.get("added") or [] if isinstance(c, dict)
+            )
+    replaced: list[str] = []
+    dropped: list[str] = []
+    subs = []
+    for sub in llm_result.get("substitutions") or []:
+        if not isinstance(sub, dict):
+            continue
+        added = []
+        for card in sub.get("added") or []:
+            if not isinstance(card, dict):
+                continue
+            name = str(card.get("name") or "").strip()
+            if name.lower() not in blocked:
+                added.append(card)
+                continue
+            data = card_data.get(name.lower())
+            model = _to_card(data) if data else MagicCard(name=name, count=1, category=card.get("category"))
+            alt = replacement_for(model, candidates, taken, max_price=max_price)
+            if alt is None:
+                dropped.append(name)
+                continue
+            taken.add(alt.key)
+            card_data[alt.key] = alt.data
+            added.append({"name": alt.name, "count": 1, "category": card.get("category")})
+            replaced.append(f"{name} -> {alt.name}")
+        subs.append({**sub, "added": added})
+    notes = list(llm_result.get("notes") or [])
+    if replaced:
+        notes.append(
+            "Kept out card(s) you removed in an earlier revision (name one in a request to "
+            f"bring it back): {'; '.join(replaced)}."
+        )
+    if dropped:
+        notes.append(
+            f"Skipped re-adding card(s) you removed earlier: {', '.join(dict.fromkeys(dropped))}."
+        )
+    return {**llm_result, "substitutions": subs, "notes": notes}
+
+
+def _force_requested_cuts(
+    decklist: list[MagicCard],
+    names: set[str],
+    candidates: list[Any],
+    unavailable: set[str],
+    max_price: Optional[float],
+    notes: list[str],
+) -> list[DeckSubstitution]:
+    """Remove cards the user asked to cut that the model left in, each for a same-job card."""
+    taken = set(unavailable)
+    swaps: list[DeckSubstitution] = []
+    missed: list[str] = []
+    for card in [c for c in decklist if c.name.lower() in names]:
+        alt = replacement_for(card, candidates, taken, max_price=max_price)
+        if alt is None:
+            missed.append(card.name)
+            continue
+        taken.add(alt.key)
+        stand_in = _to_deck_card(alt)
+        stand_in.category = card.category or stand_in.category
+        removed = card.model_copy(update={"count": 1})
+        if (card.count or 1) > 1:
+            card.count -= 1
+            decklist.append(stand_in)
+        else:
+            decklist[decklist.index(card)] = stand_in
+        swaps.append(
+            DeckSubstitution(
+                removed=[removed],
+                added=[stand_in],
+                explanation=f"You asked to remove {card.name}; {alt.name} takes its place.",
+            )
+        )
+    if swaps:
+        notes.append(
+            "Removed the card(s) you asked to cut that the suggestions had kept: "
+            f"{', '.join(s.removed[0].name for s in swaps)}."
+        )
+    if missed:
+        notes.append(f"Couldn't find a replacement for: {', '.join(missed)} - they're still in the deck.")
+    return swaps
+
+
+def _next_cut_cards(
+    prior_cut: list[str],
+    substitutions: list[DeckSubstitution],
+    requested_cuts: list[str],
+    final_keys: set[str],
+) -> list[str]:
+    """Cards to keep out of later revisions: earlier cuts plus this revision's removals.
+
+    A card back in the deck (re-added on request) is no longer cut.
+    """
+    names = list(prior_cut)
+    names += [card.name for sub in substitutions for card in sub.removed if card.name not in _BASIC_NAMES]
+    names += requested_cuts
+    seen: set[str] = set()
+    result: list[str] = []
+    for name in names:
+        key = name.strip().lower()
+        if not key or key in seen or key in final_keys:
+            continue
+        seen.add(key)
+        result.append(name.strip())
+    return result[-MAX_CUT_CARDS:]
 
 
 def _kept_cards(plan: Optional[DeckPlan], previous_decklist: list[MagicCard]) -> list[str]:
@@ -2076,6 +2431,7 @@ def _next_plan(
         notes.append(f"Game plan updated per your request: {strategy}")
         return DeckPlan(
             strategy=strategy,
+            concept=strategy,
             theme_queries=queries or prior.theme_queries,
             # A new plan may embrace a theme the old one avoided.
             avoid_queries=sanitize_theme_queries(returned.get("avoid_queries"))[:3],

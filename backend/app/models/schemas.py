@@ -69,7 +69,11 @@ class DeckPlan(BaseModel):
     """A deck's core game plan, kept across revisions so revamps stay on theme."""
 
     strategy: str = Field(default="", max_length=2000)
-    theme_queries: list[str] = Field(default_factory=list, max_length=4)
+    # Up to 6: a plan's own searches plus those of a subtheme added in a revision.
+    theme_queries: list[str] = Field(default_factory=list, max_length=6)
+    # The deck concept as revised by later requests (a new subtheme or game plan);
+    # empty means the original build prompt still describes the deck.
+    concept: str = Field(default="", max_length=2000)
     # Hard cap on the 99's total price (USD), read from the concept or a change request.
     budget: Optional[float] = Field(default=None, ge=0, le=100000)
     # Scryfall searches for themes the concept rules out (kept out of candidate pools).
@@ -77,6 +81,9 @@ class DeckPlan(BaseModel):
     # Cards the user restored by reverting a swap: revisions must keep them unless a
     # change request names them explicitly.
     kept_cards: list[str] = Field(default_factory=list, max_length=200)
+    # Cards taken out by a revision or by reverting the swap that added them: later
+    # revisions must not add them back unless a change request names them.
+    cut_cards: list[str] = Field(default_factory=list, max_length=300)
 
 
 class RevampDeckRequest(BaseModel):

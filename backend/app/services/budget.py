@@ -315,6 +315,34 @@ def cheaper_alternative(
     return min(options, key=lambda c: price_of(c) or 0) if options else None
 
 
+def replacement_for(
+    card: MagicCard,
+    candidates: Iterable[PoolCard],
+    blocked: set[str],
+    max_price: Optional[float] = None,
+) -> Optional[PoolCard]:
+    """The best candidate to take ``card``'s slot: same job first, then on-theme, then score.
+
+    Used when a card must go (the user asked to cut it) or a suggested addition isn't
+    allowed (the user removed it before). Lands are only replaced by lands and spells by
+    spells; ``max_price`` (when set) keeps the stand-in within the budget's per-card cap.
+    """
+    candidates = list(candidates)
+    pool_roles = {c.key: set(c.roles) for c in candidates}
+    roles = _roles_of(card, pool_roles) - {"synergy"}
+    land = _is_land(card)
+    options = [
+        c for c in candidates
+        if c.key not in blocked
+        and c.key != card.name.lower()
+        and c.is_land == land
+        and (max_price is None or (price_of(c) or 0.0) <= max_price)
+    ]
+    if not options:
+        return None
+    return max(options, key=lambda c: (bool(roles & c.roles), "theme" in c.roles, c.score()))
+
+
 def budget_note(budget: Optional[float], total: float, swaps: list[tuple[MagicCard, MagicCard]]) -> list[str]:
     """User-facing notes: the real total against the cap, plus any budget swaps made."""
     if budget is None:

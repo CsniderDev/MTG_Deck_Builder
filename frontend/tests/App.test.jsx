@@ -210,6 +210,8 @@ describe('App', () => {
       .map(([, init]) => JSON.parse(init.body));
     expect(revampBodies).toHaveLength(2);
     expect(revampBodies[1].plan.kept_cards).toEqual(['Cultivate']);
+    // The card the reverted swap added is remembered as unwanted.
+    expect(revampBodies[1].plan.cut_cards).toEqual(["Nature's Lore"]);
     expect(revampBodies[1].previous_decklist.map((card) => card.name)).toContain('Cultivate');
   });
 

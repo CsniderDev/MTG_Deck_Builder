@@ -371,6 +371,63 @@ class LLMService:
         )
         return await self._generate_json(prompt)
 
+    async def plan_revision(
+        self,
+        commander: dict[str, Any],
+        concept: str,
+        plan_strategy: str,
+        theme_queries: Iterable[str],
+        avoid_queries: Iterable[str],
+        change_request: str,
+    ) -> Optional[dict[str, Any]]:
+        """Decide whether a change request changes the deck's direction, and how.
+
+        Runs before a revamp whose request mentions themes or strategy, so a new subtheme
+        or a new game plan gets real Scryfall candidates and an updated plan instead of
+        being fought by the old one.
+        """
+        if self._provider is None:
+            return None
+        ci = "".join(commander.get("color_identity") or []) or "C"
+        prompt = (
+            "You are an expert Magic: The Gathering Commander deck builder. A user is revising "
+            "their deck. Decide whether their change request changes the deck's direction.\n\n"
+            f"Commander: {commander.get('name')} (color identity: {ci})\n"
+            f"Oracle text: {commander.get('oracle_text') or '(none)'}\n"
+            f"Current concept: {concept or '(none)'}\n"
+            f"Current game plan: {plan_strategy or '(not recorded)'}\n"
+            f"Current theme searches: {'; '.join(theme_queries) or '(none)'}\n"
+            f"Themes currently kept out: {'; '.join(avoid_queries) or '(none)'}\n"
+            f"Change request: {change_request}\n\n"
+            "Respond ONLY with a JSON object:\n"
+            "{\n"
+            '  "change": "none" | "subtheme" | "new_plan",\n'
+            '  "concept": "<the deck concept after this request, 1-2 sentences>",\n'
+            '  "strategy": "<the game plan after this request, 1-3 sentences>",\n'
+            '  "theme_queries": ["<Scryfall query for the NEW theme or subtheme>", "..."],\n'
+            '  "avoid_queries": ["<Scryfall query for a theme the deck should now keep out>", "..."],\n'
+            '  "swap_target": <how many swaps this revision should make>\n'
+            "}\n"
+            "Rules:\n"
+            "- \"subtheme\": the request adds or strengthens a secondary theme (\"add a small "
+            "artifact subtheme\", \"lean more into tokens\", \"splash some lifegain\") while "
+            "keeping the current plan. strategy = the current plan plus the subtheme; concept = "
+            "the current concept plus the subtheme.\n"
+            "- \"new_plan\": the request replaces the theme or strategy (\"switch to...\", "
+            "\"make it a ... deck instead\", \"change the theme to...\"). strategy and concept "
+            "describe the new plan only.\n"
+            "- \"none\": anything else (more removal, lower the curve, cut a card, budget...). "
+            "Then repeat the current concept and plan and leave theme_queries empty.\n"
+            "- theme_queries: 1-3 Scryfall queries that find cards for the NEW theme or subtheme "
+            "only, using syntax such as o:\"text\", t:type, kw:keyword, otag:tag (e.g. "
+            "otag:artifact-payoff, t:artifact o:\"whenever\", o:\"create\" o:\"treasure\"). "
+            "No color, format, legality or ordering filters - the server adds those.\n"
+            "- avoid_queries: the kept-out themes that still don't fit, with any the request "
+            "now wants removed from the list (0-3 queries).\n"
+            "- swap_target: about 8-15 for a subtheme, 20-35 for a new plan, 0 for \"none\".\n"
+        )
+        return await self._generate_json(prompt)
+
     async def select_cards(
         self,
         commander: dict[str, Any],
@@ -476,14 +533,63 @@ class LLMService:
         current_total: Optional[float] = None,
         avoid_queries: Optional[Iterable[str]] = None,
         locked_cards: Optional[Iterable[str]] = None,
+        cut_cards: Optional[Iterable[str]] = None,
+        requested_cuts: Optional[Iterable[str]] = None,
+        direction: Optional[dict[str, Any]] = None,
     ) -> Optional[dict[str, Any]]:
         """Ask the LLM to revise an existing decklist and explain each substitution.
 
         The deck's recorded game plan leads the prompt and every change must serve it
-        unless the change request explicitly asks for a different plan.
+        unless the change request explicitly asks for a different plan. ``direction`` is
+        set when a planning step found that the request adds a subtheme or a new plan
+        (keys ``change``, ``strategy``, ``swap_target``); the prompt then asks for that
+        change instead of defending the old plan.
         """
         if self._provider is None:
             return None
+        cut = [name for name in (cut_cards or []) if name]
+        cut_line = (
+            "NEVER ADD THESE CARDS - the user removed them (or undid swaps that added them) in "
+            f"earlier revisions: {', '.join(cut)}\n"
+            if cut
+            else ""
+        )
+        wanted_cuts = [name for name in (requested_cuts or []) if name]
+        requested_line = (
+            "The user asked to remove these cards - each one MUST appear in a \"removed\" list, "
+            f"replaced by a card that is NOT already in the deck: {', '.join(wanted_cuts)}\n"
+            if wanted_cuts
+            else ""
+        )
+        change = (direction or {}).get("change")
+        direction_line = ""
+        if change in ("subtheme", "new_plan"):
+            swap_target = int((direction or {}).get("swap_target") or 0)
+            if change == "subtheme":
+                size = f"about {swap_target or 10}"
+                what = (
+                    "adds a SUBTHEME on top of the current plan. Keep the core plan's key "
+                    "pieces, but cut its weakest or most generic cards to make room"
+                )
+            else:
+                size = f"about {swap_target or 25}"
+                what = (
+                    "CHANGES THE DECK'S GAME PLAN. The plan below replaces the old one: cut the "
+                    "cards that only served the old plan"
+                )
+            direction_line = (
+                f"THIS REQUEST {what}. Make {size} swaps so the change is really there - a "
+                "token gesture of one or two cards is not enough. Take most additions from the "
+                "candidates listed below.\n"
+            )
+        plan_rule = (
+            "- The change request changes the theme, so follow the UPDATED game plan; the old "
+            "plan and the original concept apply only where they don't conflict with it.\n"
+            if direction_line
+            else "- Only change the game plan when the request clearly asks for it (e.g. \"switch "
+            "to...\", \"make it a ... deck instead\", \"change the theme/strategy\", \"add a ... "
+            "subtheme\").\n"
+        )
         gc_block = _gamechanger_block(gamechanger_limit, gamechangers)
         compact_previous_decklist = _compact_decklist_for_prompt(
             previous_decklist, include_prices=budget is not None
@@ -520,12 +626,20 @@ class LLMService:
             f"Commander: {commander.get('name')} "
             f"(color identity: {''.join(commander.get('color_identity') or []) or 'C'}).\n"
             f"Bracket {bracket} - {bracket_description}\n"
-            f"CORE GAME PLAN (keep it unless the change request explicitly asks to change it): {plan_line}\n"
-            f"Original user concept (a hard requirement): {user_prompt or '(none)'}\n"
+            + (
+                f"UPDATED GAME PLAN (from this change request - follow it): {plan_line}\n"
+                if direction_line
+                else f"CORE GAME PLAN (keep it unless the change request explicitly asks to change it): {plan_line}\n"
+            )
+            + f"Deck concept (a hard requirement{', as updated by this request' if direction_line else ''}): "
+            f"{user_prompt or '(none)'}\n"
             f"{avoid_line}"
             f"{locked_line}"
+            f"{cut_line}"
+            f"{requested_line}"
             f"{budget_instructions(budget, current_total)}"
-            f"User change request: {change_request}\n\n"
+            f"User change request: {change_request}\n"
+            f"{direction_line}\n"
             "How to revise:\n"
             "- Apply the change request IN SERVICE OF the core game plan. Every card you add "
             "must support that plan or do a job the request asks for in a way that fits it.\n"
@@ -534,14 +648,15 @@ class LLMService:
             "on-plan cards first. Never swap theme pieces or synergy cards for generic staples "
             "unless the request asks for that.\n"
             "- Change only what the request needs; keep everything else.\n"
-            "- Never add cards for a theme the concept didn't ask for (other tribes, counters, "
-            "tokens...) just because the commander is popular with it.\n"
+            "- Never add cards for a theme neither the concept nor this request asked for (other "
+            "tribes, counters, tokens...) just because the commander is popular with it.\n"
+            "- Never add a card the deck already has, and never re-add a card from the NEVER "
+            "ADD list.\n"
             "- Every card in a substitution's \"removed\" list MUST be copied exactly from the "
             "current decklist below - never remove a card the deck doesn't have. Each swap "
             "removes as many cards as it adds, so the deck stays the same size. List EVERY "
             "change as a swap - the server applies exactly your swaps and nothing else.\n"
-            "- Only change the game plan when the request clearly asks for it (e.g. \"switch "
-            "to...\", \"make it a ... deck instead\", \"change the theme/strategy\").\n\n"
+            f"{plan_rule}\n"
             f"{candidates_block}"
             f"Here is a current list of banned cards. DO NOT include any of these cards at all:\n{json.dumps(list(banned_list or []))}\n\n"
             f"{gc_block}"

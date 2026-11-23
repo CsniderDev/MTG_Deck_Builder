@@ -192,6 +192,22 @@ request names the card: the prompt lists them, `_protect_locked_cards` strips th
 "removed" list (the now-uneven swap's additions are dropped), and the land floor, `_fit_deck_size` and
 budget enforcement skip them. The returned plan keeps only kept cards still in the deck.
 
+**Removed cards stay out.** `DeckPlan.cut_cards` collects every card a revision swapped out, every
+card the change request asked to cut, and (client-side, in `applySubstitutionRevert`) the cards a
+reverted swap had added. Revamp lists them as NEVER ADD in the prompt; `_replace_blocked_additions`
+swaps any re-suggested one for a same-role pool card (`budget.replacement_for`), and land/budget fills
+exclude them. Naming a cut card in a change request lifts the block. `_requested_cuts` reads removal
+wording ("cut X", "replace X with Y", "X has to go"); cuts the model ignored are forced in code by
+`_force_requested_cuts`.
+
+**Theme changes in revisions.** A change request that matches `_DIRECTION_WORDS` (theme, subtheme,
+switch, lean into, tribal...) first goes through `LLMService.plan_revision`, which answers
+`none` / `subtheme` / `new_plan` with a new strategy, concept, theme and avoid queries, and a swap
+target. On a change, the candidate pool uses the new queries, the revamp prompt presents the
+UPDATED plan and asks for a real number of swaps, and `_direction_plan` stores the new plan (a
+subtheme's queries are added to the old ones, up to 6; `DeckPlan.concept` replaces the original
+prompt in later revisions).
+
 **Plans persist across revisions.** Builds return `DeckResponse.plan` (`DeckPlan`: strategy + theme
 queries); the frontend sends it back as `RevampDeckRequest.plan`. Revamp puts the plan first in the
 prompt, re-runs its theme queries to offer on-theme candidates (`render_theme_candidates`), and keeps

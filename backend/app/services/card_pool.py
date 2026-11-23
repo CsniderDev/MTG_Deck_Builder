@@ -168,8 +168,8 @@ class CardPool:
         return sorted(cards, key=lambda c: c.score(), reverse=True)
 
 
-def sanitize_theme_queries(queries: Any) -> list[str]:
-    """Keep up to ``MAX_THEME_QUERIES`` short Scryfall queries without scope-changing keys."""
+def sanitize_theme_queries(queries: Any, limit: int = MAX_THEME_QUERIES) -> list[str]:
+    """Keep up to ``limit`` short Scryfall queries without scope-changing keys."""
     cleaned: list[str] = []
     if not isinstance(queries, list):
         return cleaned
@@ -181,7 +181,7 @@ def sanitize_theme_queries(queries: Any) -> list[str]:
             continue
         if query not in cleaned:
             cleaned.append(query)
-        if len(cleaned) >= MAX_THEME_QUERIES:
+        if len(cleaned) >= limit:
             break
     return cleaned
 
