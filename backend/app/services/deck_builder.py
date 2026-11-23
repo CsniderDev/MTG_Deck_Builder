@@ -41,8 +41,20 @@ from .card_pool import (
     render_pool,
     render_theme_candidates,
     sanitize_theme_queries,
+    _to_deck_card,
 )
-from .llm import LLMService, _budget_block
+from .budget import (
+    budget_note,
+    card_price_cap,
+    cheaper_alternative,
+    deck_total,
+    enforce_budget,
+    parse_budget,
+    price_of,
+    removes_budget,
+    strip_llm_budget_claims,
+)
+from .llm import LLMService
 from .scryfall import ScryfallClient, ScryfallError
 
 logger = logging.getLogger(__name__)
@@ -145,6 +157,7 @@ class DeckBuilder:
         bracket_desc = BRACKET_DESCRIPTIONS[request.bracket]
         limit = gamechanger_limit(request.bracket)
         has_prompt = bool((request.prompt or "").strip())
+        budget = parse_budget(request.prompt)
         banned_list = set(name.strip().lower() for name in request.banned_list or [])
         gamechangers = set(name.strip().lower() for name in request.gamechangers or []) or {
             name.lower() for name in GAMECHANGERS
@@ -175,6 +188,7 @@ class DeckBuilder:
                     bracket_description=bracket_desc,
                     user_prompt=request.prompt,
                     gamechanger_limit=limit,
+                    budget=budget,
                 ),
                 self._fetch_recommendations(commander_card["name"]),
                 prefetch_base_searches(self._scryfall, command_cards),
@@ -190,6 +204,11 @@ class DeckBuilder:
             # Never let a missing/garbled field silently drop the concept from the pool.
             theme_queries = fallback_theme_queries(request.prompt)
             logger.warning("Plan had no usable theme queries; derived %s from the concept", theme_queries)
+        # Searches for the commander's usual themes that the concept rules out. A query
+        # that is also a theme query would empty the theme, so those are dropped.
+        avoid_queries = [
+            q for q in sanitize_theme_queries(plan.get("avoid_queries"))[:3] if q not in theme_queries
+        ] if has_prompt else []
 
         # Step 2: a numbered pool of real, legal, on-color candidates.
         pool = await build_card_pool(
@@ -200,6 +219,8 @@ class DeckBuilder:
             banned_list,
             gamechangers,
             limit,
+            max_card_price=card_price_cap(budget),
+            avoid_queries=avoid_queries,
         )
 
         # Step 3 (LLM): pick from the pool by number.
@@ -213,9 +234,10 @@ class DeckBuilder:
                 user_prompt=request.prompt,
                 plan=plan,
                 targets=targets,
-                pool_text=render_pool(pool, include_prices=bool(_budget_block(request.prompt))),
+                pool_text=render_pool(pool, include_prices=budget is not None),
                 deck_size=deck_size,
                 gamechanger_limit=limit,
+                budget=budget,
             )
             if selection is None or not isinstance(selection.get("picks"), (list, dict)):
                 raise DeckBuilderError(self._llm_failure_message("deck"))
@@ -224,9 +246,14 @@ class DeckBuilder:
             explanation = str(selection.get("explanation") or "").strip() or strategy or "(no explanation provided)"
             extra_notes = selection.get("notes")
             if isinstance(extra_notes, list):
-                notes.extend(str(n) for n in extra_notes if n)
+                llm_notes = [str(n) for n in extra_notes if n]
+                notes.extend(strip_llm_budget_claims(llm_notes) if budget is not None else llm_notes)
             if theme_queries:
                 notes.append(f"Searched for theme cards with: {'; '.join(theme_queries)}.")
+            if avoid_queries:
+                notes.append(
+                    f"Kept off-concept themes out of the candidates: {'; '.join(avoid_queries)}."
+                )
             source = "llm"
         else:
             explanation = _heuristic_explanation(commander_card, recommendations)
@@ -242,6 +269,12 @@ class DeckBuilder:
             decklist, command_cards, recommendations, banned_list | gamechangers, notes
         )
         decklist = await self._balance_basics(decklist, command_cards, notes)
+        if budget is not None:
+            pool_data = {card.key: card.data for card in pool.cards}
+            budget_swaps, total = await self._apply_budget(
+                decklist, budget, pool.cards, pool_data, command_cards, banned_list | gamechangers, notes
+            )
+            notes.extend(budget_note(budget, total, budget_swaps))
         notes.extend(_exploration_note(pool, decklist))
         response = DeckResponse(
             version=1,
@@ -256,7 +289,12 @@ class DeckBuilder:
             substitutions=[],
             source=source,
             plan=(
-                DeckPlan(strategy=str(plan.get("strategy") or "")[:2000], theme_queries=theme_queries)
+                DeckPlan(
+                    strategy=str(plan.get("strategy") or "")[:2000],
+                    theme_queries=theme_queries,
+                    budget=budget,
+                    avoid_queries=avoid_queries,
+                )
                 if has_prompt
                 else None
             ),
@@ -341,9 +379,27 @@ class DeckBuilder:
         # instead of drifting toward generic staples.
         prior_plan = request.plan
         theme_queries = sanitize_theme_queries(prior_plan.theme_queries) if prior_plan else []
+        avoid_queries = sanitize_theme_queries(prior_plan.avoid_queries)[:3] if prior_plan else []
+        # The budget is a hard cap that carries across revisions; a change request can set
+        # a new one ("get it under $75") or lift it ("ignore the budget").
+        budget = parse_budget(request.change_request)
+        if budget is None and not removes_budget(request.change_request):
+            budget = (prior_plan.budget if prior_plan else None) or parse_budget(request.prompt)
+        command_cards = [c for c in (commander_card, secondary_commander_card) if c]
+        current_total: Optional[float] = None
+        if budget is not None:
+            priced = [card.model_copy() for card in request.previous_decklist]
+            if any(price_of(card) is None for card in priced):
+                priced = await self._hydrate_cards(priced, {})
+            current_total = deck_total(priced)
+            previous_payload = [
+                {**entry, "price": card.price} for entry, card in zip(previous_payload, priced)
+            ]
         theme_candidates = ""
-        if theme_queries:
-            command_cards = [c for c in (commander_card, secondary_commander_card) if c]
+        theme_pool: Optional[CardPool] = None
+        if theme_queries or budget is not None:
+            # Budget revisions also need cheap role cards (ramp, draw, removal...) to
+            # replace expensive ones, which the pool's base searches provide.
             theme_pool = await build_card_pool(
                 self._scryfall,
                 command_cards,
@@ -352,9 +408,13 @@ class DeckBuilder:
                 banned_list,
                 gamechangers or {name.lower() for name in GAMECHANGERS},
                 limit,
+                max_card_price=card_price_cap(budget),
+                avoid_queries=avoid_queries,
             )
             theme_candidates = render_theme_candidates(
-                theme_pool, {card.name for card in request.previous_decklist}
+                theme_pool,
+                {card.name for card in request.previous_decklist},
+                include_prices=budget is not None,
             )
 
         llm_result = await self._llm.revamp_deck(
@@ -369,6 +429,9 @@ class DeckBuilder:
             banned_list=banned_list,
             plan_strategy=prior_plan.strategy if prior_plan else "",
             theme_candidates=theme_candidates,
+            budget=budget,
+            current_total=current_total,
+            avoid_queries=avoid_queries,
         )
         if llm_result is None:
             llm_failed = True
@@ -460,6 +523,35 @@ class DeckBuilder:
                 notes,
             )
             decklist = await self._balance_basics(decklist, command_cards, notes)
+            if budget is not None:
+                notes[:] = strip_llm_budget_claims(notes)
+                # Swaps that made the deck pricier go first (the user's own cards come
+                # back), then the priciest cards are traded for cheaper ones doing the
+                # same job - each shown as a swap.
+                pool_cards = theme_pool.cards if theme_pool else []
+                pool_data = {card.key: card.data for card in pool_cards}
+                decklist, substitutions, stand_ins = _revert_costly_swaps(
+                    decklist,
+                    substitutions,
+                    prefetched_cards,
+                    budget,
+                    notes,
+                    candidates=pool_cards,
+                    excluded=banned_list | gamechangers,
+                )
+                if stand_ins:
+                    await self._hydrate_cards(stand_ins, pool_data)
+                budget_swaps, total = await self._apply_budget(
+                    decklist,
+                    budget,
+                    pool_cards,
+                    pool_data,
+                    command_cards,
+                    banned_list | gamechangers,
+                    [],
+                )
+                substitutions = _record_budget_swaps(substitutions, budget_swaps, budget)
+                notes.extend(budget_note(budget, total, budget_swaps))
             substitutions = _reconcile_substitutions(substitutions, previous_payload, decklist)
         substitutions = await self._hydrate_substitutions(substitutions, prefetched_cards)
         next_version = (
@@ -480,10 +572,45 @@ class DeckBuilder:
             notes=notes,
             substitutions=substitutions,
             source=source,
-            plan=_next_plan(prior_plan, llm_result, notes),
+            plan=_with_budget(_next_plan(prior_plan, llm_result, notes), budget),
         )
         self._cache_set(cache_key, response)
         return response
+
+    async def _apply_budget(
+        self,
+        decklist: list[MagicCard],
+        budget: float,
+        candidates: list[Any],
+        candidate_data: dict[str, dict[str, Any]],
+        command_cards: list[dict[str, Any]],
+        excluded: set[str],
+        notes: list[str],
+    ) -> tuple[list[tuple[MagicCard, MagicCard]], float]:
+        """Bring the deck under ``budget`` in code, re-checking with hydrated prices.
+
+        Replacement basics only get real prices once hydrated, and rebalancing basics
+        can shift the total by cents, so the check runs again (at most 3 passes).
+        """
+        identity: set[str] = set()
+        for commander in command_cards:
+            identity.update(commander.get("color_identity") or [])
+        all_swaps: list[tuple[MagicCard, MagicCard]] = []
+        total = deck_total(decklist)
+        for _ in range(3):
+            swaps, total = enforce_budget(
+                decklist, budget, candidates, identity, excluded=excluded | {c.name.lower() for c, _ in all_swaps}
+            )
+            if not swaps:
+                break
+            all_swaps.extend(swaps)
+            await self._hydrate_cards([new for _, new in swaps], candidate_data)
+            if any(new.name in _BASIC_NAMES for _, new in swaps):
+                await self._balance_basics(decklist, command_cards, notes)
+            total = deck_total(decklist)
+            if total <= budget:
+                break
+        return all_swaps, total
 
     async def _enforce_land_count(
         self,
@@ -1530,6 +1657,26 @@ def _apply_listed_swaps(
     current = _card_counts(entries)
     fixed: list[str] = []
 
+    # Singleton: a nonbasic card can only be added once, and never when the deck already
+    # has it. Models sometimes reuse one addition in several swaps; the repeats are
+    # dropped here, which leaves those swaps uneven, so the evening-out below puts their
+    # removed cards back instead of the deck coming up short.
+    seen_added: set[str] = set()
+    duplicates: list[str] = []
+    for sub in subs:
+        kept_added = []
+        for card in sub.get("added") or []:
+            if not isinstance(card, dict):
+                continue
+            name = str(card.get("name") or "").strip()
+            key = name.lower()
+            if name not in _BASIC_NAMES and (key in seen_added or previous[key] > 0):
+                duplicates.append(name)
+                continue
+            seen_added.add(key)
+            kept_added.append(card)
+        sub["added"] = kept_added
+
     def set_count(name: str, key: str, count: int, category: Optional[str] = None) -> None:
         if key in by_key:
             if count <= 0:
@@ -1636,9 +1783,14 @@ def _apply_listed_swaps(
                 kept_names = ", ".join(str(c.get("name")) for c in removed if restored[str(c.get("name") or "").strip().lower()])
                 skipped.append(f"kept {kept_names} (the swap removed more cards than it added)")
 
-    if not fixed and not skipped:
+    if not fixed and not skipped and not duplicates:
         return llm_result
     notes = list(llm_result.get("notes") or [])
+    if duplicates:
+        notes.append(
+            "Ignored addition(s) of cards the deck already has or another swap already adds: "
+            f"{', '.join(dict.fromkeys(duplicates))}."
+        )
     if skipped:
         notes.append(
             f"Evened out {len(skipped)} uneven swap(s) so the deck keeps its size: {'; '.join(skipped[:6])}"
@@ -1658,13 +1810,181 @@ def _reconcile_substitutions(
     """
     previous = _card_counts(previous_payload)
     final = _card_counts(final_deck)
+    # How many copies really left / joined the deck. Each swap uses up what it shows,
+    # so one added card can't be credited to several swaps.
+    gone = Counter({k: previous[k] - final[k] for k in previous if previous[k] > final[k]})
+    joined = Counter({k: final[k] - previous[k] for k in final if final[k] > previous[k]})
+
+    def claim(cards: list[MagicCard], available: Counter) -> list[MagicCard]:
+        shown: list[MagicCard] = []
+        for card in cards:
+            key = card.name.strip().lower()
+            count = min(max(1, card.count or 1), available[key])
+            if count > 0:
+                available[key] -= count
+                shown.append(card if count == (card.count or 1) else card.model_copy(update={"count": count}))
+        return shown
+
     kept: list[DeckSubstitution] = []
     for sub in substitutions:
-        removed = [c for c in sub.removed if final[c.name.strip().lower()] < previous[c.name.strip().lower()]]
-        added = [c for c in sub.added if final[c.name.strip().lower()] > previous[c.name.strip().lower()]]
+        removed = claim(sub.removed, gone)
+        added = claim(sub.added, joined)
         if removed or added:
             kept.append(sub.model_copy(update={"removed": removed, "added": added}))
     return kept
+
+
+def _with_budget(plan: Optional[DeckPlan], budget: Optional[float]) -> Optional[DeckPlan]:
+    """Carry the revision's budget (possibly newly set or lifted) on the plan."""
+    if plan is None:
+        return DeckPlan(budget=budget) if budget is not None else None
+    return plan.model_copy(update={"budget": budget})
+
+
+def _undo_swap(
+    decklist: list[MagicCard], sub: DeckSubstitution, card_data: dict[str, dict[str, Any]]
+) -> None:
+    """Take a swap's added cards back out and put its removed cards back in."""
+    by_name = {card.name.lower(): card for card in decklist}
+    for card in sub.added:
+        existing = by_name.get(card.name.lower())
+        if existing is not None:
+            existing.count -= max(1, card.count or 1)
+            if existing.count <= 0:
+                decklist.remove(existing)
+                by_name.pop(card.name.lower(), None)
+    for card in sub.removed:
+        count = max(1, card.count or 1)
+        existing = by_name.get(card.name.lower())
+        if existing is not None:
+            existing.count += count
+            continue
+        data = card_data.get(card.name.strip().lower())
+        restored = _to_card(data) if data else card.model_copy()
+        restored.count = count
+        restored.category = card.category or restored.category
+        decklist.append(restored)
+        by_name[card.name.lower()] = restored
+
+
+def _swap_cost(sub: DeckSubstitution, card_data: dict[str, dict[str, Any]]) -> float:
+    """How much a swap adds to the deck's price (negative when it saves money)."""
+
+    def cost(cards: list[MagicCard]) -> float:
+        total = 0.0
+        for card in cards:
+            data = card_data.get(card.name.strip().lower())
+            price = price_of(data) if data else price_of(card)
+            total += (price or 0.0) * max(1, card.count or 1)
+        return total
+
+    return cost(sub.added) - cost(sub.removed)
+
+
+def _revert_costly_swaps(
+    decklist: list[MagicCard],
+    substitutions: list[DeckSubstitution],
+    card_data: dict[str, dict[str, Any]],
+    budget: float,
+    notes: list[str],
+    candidates: Iterable[Any] = (),
+    excluded: Iterable[str] = (),
+) -> tuple[list[MagicCard], list[DeckSubstitution], list[MagicCard]]:
+    """Fix the swaps that raise the price the most while the deck is over budget.
+
+    First choice is to keep the swap's intent with a cheaper card that does the same job
+    (a cheaper removal spell for an expensive one), so the user's request still happens;
+    a swap with no cheaper stand-in is undone. Returns the deck, the swaps, and the
+    stand-in cards (not hydrated yet).
+    """
+    candidates = list(candidates)
+    blocked_extra = {name.strip().lower() for name in excluded}
+    kept = list(substitutions)
+    reverted: list[str] = []
+    cheapened: list[str] = []
+    stand_ins: list[MagicCard] = []
+    tried: set[int] = set()
+    while (total := deck_total(decklist)) > budget:
+        costly = [(cost, sub) for sub in kept if (cost := _swap_cost(sub, card_data)) > 0]
+        if not costly:
+            break
+        cost, sub = max(costly, key=lambda item: item[0])
+        if id(sub) not in tried and candidates:
+            tried.add(id(sub))
+            changed = False
+            for index, added in enumerate(list(sub.added)):
+                deck_card = next((c for c in decklist if c.name.lower() == added.name.lower()), None)
+                if deck_card is None or added.name in _BASIC_NAMES:
+                    continue
+                if price_of(deck_card) is None:
+                    data = card_data.get(added.name.strip().lower())
+                    deck_card.price = (data or {}).get("prices", {}).get("usd") if data else None
+                price = price_of(deck_card) or 0.0
+                over = deck_total(decklist) - budget
+                if over <= 0 or price <= 0:
+                    break
+                blocked = {c.name.lower() for c in decklist} | blocked_extra
+                alt = cheaper_alternative(deck_card, candidates, blocked, target_price=price - over)
+                if alt is None:
+                    continue
+                stand_in = _to_deck_card(alt)
+                stand_in.category = deck_card.category or stand_in.category
+                decklist[decklist.index(deck_card)] = stand_in
+                sub.added[index] = stand_in
+                sub.explanation = (
+                    f"{sub.explanation} (Budget: {added.name} at ${price:.2f} didn't fit, so this "
+                    f"uses {alt.name} at ${price_of(alt) or 0:.2f} for the same job.)"
+                ).strip()
+                stand_ins.append(stand_in)
+                cheapened.append(f"{added.name} (${price:.2f}) -> {alt.name} (${price_of(alt) or 0:.2f})")
+                changed = True
+            if changed:
+                continue
+        _undo_swap(decklist, sub, card_data)
+        kept.remove(sub)
+        reverted.append(
+            f"{', '.join(c.name for c in sub.removed)} -> {', '.join(c.name for c in sub.added)} (+${cost:.2f})"
+        )
+    if cheapened:
+        notes.append(
+            f"Budget: used cheaper cards that do the same job in {len(cheapened)} suggested swap(s): "
+            f"{'; '.join(cheapened)}."
+        )
+    if reverted:
+        notes.append(
+            f"Budget: undid {len(reverted)} swap(s) that would have pushed the deck over "
+            f"${budget:.2f}: {'; '.join(reverted)}."
+        )
+    return decklist, kept, stand_ins
+
+
+def _record_budget_swaps(
+    substitutions: list[DeckSubstitution],
+    budget_swaps: list[tuple[MagicCard, MagicCard]],
+    budget: float,
+) -> list[DeckSubstitution]:
+    """Show code-made budget swaps in the replacements list.
+
+    When the expensive card was one a suggested swap had just added, that swap is
+    rewritten to add the cheaper card instead, rather than showing two half-swaps.
+    """
+    subs = list(substitutions)
+    for old, new in budget_swaps:
+        reason = (
+            f"Budget: {old.name} (${price_of(old) or 0:.2f}) is replaced by {new.name} "
+            f"(${price_of(new) or 0:.2f}) to keep the deck under ${budget:.2f}."
+        )
+        owner = next(
+            (s for s in subs if any(c.name.lower() == old.name.lower() for c in s.added)), None
+        )
+        if owner is not None:
+            added = [new if c.name.lower() == old.name.lower() else c for c in owner.added]
+            subs[subs.index(owner)] = owner.model_copy(
+                update={"added": added, "explanation": f"{owner.explanation} {reason}".strip()}
+            )
+        else:
+            subs.append(DeckSubstitution(removed=[old], added=[new], explanation=reason))
+    return subs
 
 
 def _next_plan(
@@ -1685,7 +2005,13 @@ def _next_plan(
         return DeckPlan(strategy=strategy, theme_queries=queries) if strategy else None
     if returned.get("changed") is True and strategy:
         notes.append(f"Game plan updated per your request: {strategy}")
-        return DeckPlan(strategy=strategy, theme_queries=queries or prior.theme_queries)
+        return DeckPlan(
+            strategy=strategy,
+            theme_queries=queries or prior.theme_queries,
+            # A new plan may embrace a theme the old one avoided.
+            avoid_queries=sanitize_theme_queries(returned.get("avoid_queries"))[:3],
+            budget=prior.budget,
+        )
     return prior
 
 

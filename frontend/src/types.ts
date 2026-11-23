@@ -29,6 +29,9 @@ export interface DeckResponse {
 export interface DeckPlan {
   strategy: string;
   theme_queries: string[];
+  /** Hard cap on the 99's total price in USD, when the user set one. */
+  budget?: number | null;
+  avoid_queries?: string[];
 }
 
 export interface DeckSubstitution {

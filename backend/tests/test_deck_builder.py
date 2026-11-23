@@ -820,3 +820,190 @@ def test_swap_removing_more_than_it_adds_keeps_the_extra_card():
     assert sorted(e["name"] for e in result["decklist"]) == ["Card 1", "Card 2", "Card 3", "New A"]
     assert [c["name"] for c in result["substitutions"][0]["removed"]] == ["Card 0"]
     assert any("Evened out 1 uneven swap" in n and "kept Card 1" in n for n in result["notes"])
+
+
+# --- budgets and concept adherence --------------------------------------------------------
+
+
+class _PricedScryfall(_StubScryfall):
+    """Stub with prices: everything $0.10, basics $0.25, plus a few named pricey cards."""
+
+    PRICES = {"Pricey": "80.00", "Pricey Ramp": "30.00"}
+
+    async def get_collection(self, names, count=True):
+        cards = await super().get_collection(names, count)
+        for card in cards:
+            if card["name"] in _BASICS:
+                card["type_line"] = f"Basic Land - {card['name']}"
+                card["prices"] = {"usd": "0.25"}
+            else:
+                card["prices"] = {"usd": self.PRICES.get(card["name"], "0.10")}
+        return cards
+
+
+_BASICS = {"Plains", "Island", "Swamp", "Mountain", "Forest", "Wastes"}
+
+
+def _priced_deck(extra):
+    """A 99-card Atraxa deck: Card 0..N cheap spells, the extra cards, and Forests."""
+    spells = [MagicCard(name=f"Card {i}", count=1, category="Theme", price="0.10") for i in range(60 - len(extra))]
+    return spells + extra + [MagicCard(name="Forest", count=39, category="Land", price="0.25")]
+
+
+@pytest.mark.asyncio
+async def test_build_with_budget_passes_it_on_and_reports_the_real_total():
+    from app.services.budget import deck_total
+
+    class _BudgetLLM(_StubLLM):
+        async def plan_deck(self, **kwargs):
+            self.plan_kwargs = kwargs
+            return {"strategy": "Clones.", "targets": {}, "theme_queries": ["otag:clone"], "avoid_queries": ["t:god", "otag:clone"]}
+
+        async def select_cards(self, **kwargs):
+            self.select_kwargs = kwargs
+            return {"picks": ["Card 1"], "explanation": "x", "notes": ["Total is $12, under budget.", "Clones!"]}
+
+    llm = _BudgetLLM(payload={})
+    builder = DeckBuilder(_PricedScryfall(), _StubEDHRec(), llm)
+    deck = await builder.build(BuildDeckRequest(commander="Atraxa", bracket=3, prompt="clones only, budget around $60"))
+    assert llm.plan_kwargs["budget"] == 60.0 and llm.select_kwargs["budget"] == 60.0
+    assert "$0.10" in llm.select_kwargs["pool_text"]  # prices shown to the model
+    assert deck_total(deck.decklist) <= 60.0
+    assert deck.plan.budget == 60.0
+    assert deck.plan.avoid_queries == ["t:god"]  # an avoid query equal to a theme query is dropped
+    assert "Clones!" in deck.notes and not any("$12" in n for n in deck.notes)
+    assert any(n.startswith("Budget: the 99 cost $") for n in deck.notes)
+
+
+@pytest.mark.asyncio
+async def test_revamp_undoes_swaps_that_break_the_budget():
+    from app.models.schemas import DeckPlan
+
+    previous = _priced_deck([MagicCard(name="Old Card", count=1, category="Theme", price="0.10")])
+    payload = {
+        "explanation": "Upgraded.",
+        "substitutions": [
+            {"removed": [{"name": "Old Card"}], "added": [{"name": "Pricey"}], "explanation": "Stronger."},
+            {"removed": [{"name": "Card 0"}], "added": [{"name": "Card 70"}], "explanation": "Cheap and fine."},
+        ],
+    }
+    llm = _StubLLM(payload)
+    builder = DeckBuilder(_PricedScryfall(), _StubEDHRec(), llm)
+    result = await builder.revamp(
+        RevampDeckRequest(
+            commander="Atraxa",
+            bracket=3,
+            previous_decklist=previous,
+            change_request="make it stronger",
+            plan=DeckPlan(strategy="Clones.", budget=40.0),
+        )
+    )
+    names = {c.name for c in result.decklist}
+    assert "Pricey" not in names and "Old Card" in names  # costly swap undone
+    assert "Card 70" in names and "Card 0" not in names  # cheap swap kept
+    assert [(s.removed[0].name, s.added[0].name) for s in result.substitutions] == [("Card 0", "Card 70")]
+    assert any("undid 1 swap" in n and "Pricey" in n for n in result.notes)
+    assert result.plan.budget == 40.0  # carried to the next revision
+
+
+@pytest.mark.asyncio
+async def test_revamp_gets_an_over_budget_deck_under_a_new_budget_with_visible_swaps():
+    from app.services.budget import deck_total
+
+    class _RecordingLLM(_StubLLM):
+        async def revamp_deck(self, **kwargs):
+            self.kwargs = kwargs
+            return {"explanation": "No changes.", "substitutions": []}
+
+    previous = _priced_deck([MagicCard(name="Pricey Ramp", count=1, category="Ramp")])
+    llm = _RecordingLLM(payload={})
+    builder = DeckBuilder(_PricedScryfall(), _StubEDHRec(), llm)
+    result = await builder.revamp(
+        RevampDeckRequest(
+            commander="Atraxa", bracket=3, previous_decklist=previous, change_request="get it under $25"
+        )
+    )
+    # Prices were looked up for the prompt (Pricey Ramp had none in the request).
+    assert llm.kwargs["budget"] == 25.0 and llm.kwargs["current_total"] > 25.0
+    assert deck_total(result.decklist) <= 25.0
+    assert "Pricey Ramp" not in {c.name for c in result.decklist}
+    budget_swaps = [s for s in result.substitutions if s.explanation.startswith("Budget:")]
+    assert [s.removed[0].name for s in budget_swaps] == ["Pricey Ramp"]
+    assert result.plan.budget == 25.0
+
+
+@pytest.mark.asyncio
+async def test_revamp_can_lift_the_budget():
+    from app.models.schemas import DeckPlan
+
+    builder = DeckBuilder(_PricedScryfall(), _StubEDHRec(), _StubLLM({"explanation": "x", "substitutions": []}))
+    result = await builder.revamp(
+        RevampDeckRequest(
+            commander="Atraxa",
+            bracket=3,
+            previous_decklist=_priced_deck([]),
+            change_request="ignore the budget, make it stronger",
+            plan=DeckPlan(strategy="Clones.", budget=40.0),
+        )
+    )
+    assert result.plan.budget is None
+
+
+def test_a_card_added_by_several_swaps_is_only_added_once():
+    from app.services.deck_builder import _apply_listed_swaps
+
+    previous = [{"name": f"Card {i}", "count": 1} for i in range(4)]
+    llm_result = {
+        "decklist": [dict(c) for c in previous],
+        "substitutions": [
+            {"removed": [{"name": "Card 0"}], "added": [{"name": "New A"}], "explanation": "a"},
+            {"removed": [{"name": "Card 1"}], "added": [{"name": "New A"}], "explanation": "again"},
+            {"removed": [{"name": "Card 2"}], "added": [{"name": "Card 3"}], "explanation": "already in"},
+        ],
+    }
+    result = _apply_listed_swaps(llm_result, previous, deck_size=4)
+    assert sorted(e["name"] for e in result["decklist"]) == ["Card 1", "Card 2", "Card 3", "New A"]
+    assert any("already has or another swap already adds: New A, Card 3" in n for n in result["notes"])
+
+
+def test_reconcile_credits_each_added_copy_to_one_swap_only():
+    from app.models.schemas import DeckSubstitution
+    from app.services.deck_builder import _reconcile_substitutions
+
+    previous = [{"name": "A", "count": 1}, {"name": "B", "count": 1}]
+    final = [MagicCard(name="B"), MagicCard(name="New")]
+    subs = [
+        DeckSubstitution(removed=[MagicCard(name="A")], added=[MagicCard(name="New")], explanation="1"),
+        DeckSubstitution(removed=[MagicCard(name="B")], added=[MagicCard(name="New")], explanation="2"),
+    ]
+    kept = _reconcile_substitutions(subs, previous, final)
+    assert [(len(s.removed), len(s.added)) for s in kept] == [(1, 1)]
+
+
+def test_costly_swap_keeps_its_job_with_a_cheaper_card_before_being_undone():
+    from app.models.schemas import DeckSubstitution
+    from app.services.card_pool import CardPool
+    from app.services.deck_builder import _revert_costly_swaps
+
+    deck = [
+        MagicCard(name="Keeper", type_line="Creature", price="1.00"),
+        MagicCard(name="Pricey Removal", category="Swap", type_line="Instant", price="9.00",
+                  oracle_text="Destroy target artifact."),
+        MagicCard(name="Forest", count=10, type_line="Basic Land - Forest", price="0.25"),
+    ]
+    sub = DeckSubstitution(
+        removed=[MagicCard(name="Old Spell")], added=[MagicCard(name="Pricey Removal")], explanation="More removal."
+    )
+    pool = CardPool()
+    pool.add({"name": "Cheap Removal", "type_line": "Instant", "prices": {"usd": "0.30"}}, "removal")
+    pool.add({"name": "Cheap Draw", "type_line": "Sorcery", "prices": {"usd": "0.10"}}, "draw")
+    card_data = {  # as validated during the revamp: the old deck plus every swap addition
+        "old spell": {"name": "Old Spell", "type_line": "Sorcery", "prices": {"usd": "0.50"}},
+        "pricey removal": {"name": "Pricey Removal", "type_line": "Instant", "prices": {"usd": "9.00"}},
+    }
+    notes = []
+    deck, subs, stand_ins = _revert_costly_swaps(deck, [sub], card_data, 5.0, notes, candidates=pool.cards)
+    assert [c.name for c in stand_ins] == ["Cheap Removal"]  # same job (role read from rules text)
+    assert "Cheap Removal" in {c.name for c in deck} and "Pricey Removal" not in {c.name for c in deck}
+    assert [c.name for c in subs[0].added] == ["Cheap Removal"] and "didn't fit" in subs[0].explanation
+    assert any("used cheaper cards that do the same job" in n for n in notes)

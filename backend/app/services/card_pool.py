@@ -54,6 +54,12 @@ MAX_THEME_QUERIES = 4
 # is a "gem": relevant to the concept but easy to overlook.
 GEM_MIN_EDHREC_RANK = 5000
 MAX_THEME_QUERY_CHARS = 120
+# Searches for themes the concept rules out (e.g. "t:god" for a clone deck). Each costs
+# one rate-limited Scryfall request, so keep them few.
+MAX_AVOID_QUERIES = 3
+AVOID_SEARCH_LIMIT = 175
+# Roles whose searches make a card useful even if an avoid search also matches it.
+_USEFUL_ROLES = {"theme", "ramp", "draw", "removal", "wipe", "land"}
 
 # Category label shown in the UI, by priority when a card has several roles.
 ROLE_LABELS = [
@@ -220,6 +226,20 @@ def fallback_theme_queries(concept: str) -> list[str]:
     return sanitize_theme_queries(queries)
 
 
+def usd_price(data: dict[str, Any]) -> Optional[float]:
+    """Cheapest-known USD price of a Scryfall card dict (non-foil first), or None."""
+    prices = data.get("prices") if isinstance(data, dict) else None
+    if not isinstance(prices, dict):
+        return None
+    for key in ("usd", "usd_foil", "usd_etched"):
+        try:
+            if prices.get(key):
+                return float(prices[key])
+        except (TypeError, ValueError):
+            continue
+    return None
+
+
 def _identity_filter(identity: Iterable[str]) -> str:
     colors = "".join(c for c in "WUBRG" if c in set(identity)).lower()
     return f"id<={colors or 'c'} f:commander"
@@ -289,8 +309,16 @@ async def build_card_pool(
     gamechangers: set[str],
     gamechanger_limit: Optional[int],
     today: Optional[date] = None,
+    max_card_price: Optional[float] = None,
+    avoid_queries: Iterable[str] = (),
 ) -> CardPool:
-    """Gather and validate candidates from EDHREC and Scryfall searches."""
+    """Gather and validate candidates from EDHREC and Scryfall searches.
+
+    ``max_card_price`` drops cards a budget can't afford (unpriced cards stay).
+    ``avoid_queries`` are searches for themes the user's concept rules out; matching
+    cards are dropped unless a role or theme search also found them, so a clone deck
+    for a God-themed commander isn't offered a pile of Gods from EDHREC.
+    """
     identity: set[str] = set()
     for commander in command_zone:
         identity.update(commander.get("color_identity") or [])
@@ -305,6 +333,8 @@ async def build_card_pool(
         searches.append(
             ("theme", "new", f"({query}) {base} new:card date>={since}", "released", "desc", THEME_NEW_LIMIT)
         )
+    for query in list(avoid_queries)[:MAX_AVOID_QUERIES]:
+        searches.append(("avoid", None, f"({query}) {base}", "edhrec", "auto", AVOID_SEARCH_LIMIT))
 
     async def run(search):
         role, tag, query, order, direction, limit = search
@@ -338,11 +368,29 @@ async def build_card_pool(
     pool = CardPool()
     gc_names = {g.lower() for g in gamechangers}
 
+    def names_for(roles: set[str]) -> set[str]:
+        return {
+            (data.get("name") or "").lower()
+            for (role, *_), cards in search_results
+            if role in roles
+            for data in cards
+        }
+
+    off_plan = names_for({"avoid"}) - names_for(_USEFUL_ROLES)
+
     def consider(data: dict[str, Any], role: Optional[str], tag: Optional[str]) -> Optional[PoolCard]:
         reason = _is_valid(data, identity, banned, command_zone_names)
         if reason:
             pool.rejected[reason] += 1
             return None
+        if (data.get("name") or "").lower() in off_plan:
+            pool.rejected["off-plan"] += 1
+            return None
+        if max_card_price is not None:
+            price = usd_price(data)
+            if price is not None and price > max_card_price:
+                pool.rejected["over budget"] += 1
+                return None
         is_gc = (data.get("name") or "").lower() in gc_names
         if is_gc and gamechanger_limit == 0:
             pool.rejected["game changer"] += 1
@@ -372,6 +420,8 @@ async def build_card_pool(
             card.tags.add("gem")
 
     for (role, tag, *_), cards in search_results:
+        if role == "avoid":
+            continue
         for data in cards:
             consider(data, role, tag)
 
@@ -405,11 +455,13 @@ def _card_line(card: PoolCard, include_prices: bool = False, numbered: bool = Tr
     if not cost and card.data.get("card_faces"):
         cost = (card.data["card_faces"][0] or {}).get("mana_cost") or ""
     tags = sorted(card.tags - {"edhrec"})
+    if "theme" in card.roles and card.label != "Theme":
+        tags.append("on-theme")  # matched a concept search but is listed under its role
     extra = f" [{', '.join(tags)}]" if tags else ""
     price = ""
     if include_prices:
-        usd = (card.data.get("prices") or {}).get("usd")
-        price = f" ${usd}" if usd else ""
+        usd = usd_price(card.data)
+        price = f" ${usd:.2f}" if usd is not None else ""
     prefix = f"#{card.id} " if numbered else ""
     line = f"{prefix}{card.name} {cost} | {card.type_line}{price}{extra}"
     if _needs_oracle_text(card):
@@ -423,6 +475,12 @@ def _card_line(card: PoolCard, include_prices: bool = False, numbered: bool = Tr
     return line
 
 
+_SECTION_NOTES = {
+    "Theme": " (found by the concept searches - the deck's identity comes from here)",
+    "Synergy": " (popular with this commander in general - use only what serves the concept)",
+}
+
+
 def render_pool(pool: CardPool, include_prices: bool = False) -> str:
     """Render the pool as compact numbered lines grouped by category."""
     groups: dict[str, list[PoolCard]] = {}
@@ -433,12 +491,14 @@ def render_pool(pool: CardPool, include_prices: bool = False) -> str:
         cards = sorted(groups.get(label, []), key=lambda c: c.score(), reverse=True)
         if not cards:
             continue
-        lines.append(f"## {label}")
+        lines.append(f"## {label}{_SECTION_NOTES.get(label, '')}")
         lines.extend(_card_line(card, include_prices) for card in cards)
     return "\n".join(lines)
 
 
-def render_theme_candidates(pool: CardPool, exclude: set[str], limit: int = 60) -> str:
+def render_theme_candidates(
+    pool: CardPool, exclude: set[str], limit: int = 60, include_prices: bool = False
+) -> str:
     """On-theme cards for a revision prompt (by name), skipping cards already in the deck.
 
     New releases and gems are listed first so they aren't crowded out by staples.
@@ -446,7 +506,7 @@ def render_theme_candidates(pool: CardPool, exclude: set[str], limit: int = 60) 
     excluded = {name.lower() for name in exclude}
     cards = [c for c in pool.cards if "theme" in c.roles and not c.is_land and c.key not in excluded]
     cards.sort(key=lambda c: (bool({"new", "gem"} & c.tags), c.score()), reverse=True)
-    return "\n".join(_card_line(card, numbered=False) for card in cards[:limit])
+    return "\n".join(_card_line(card, include_prices, numbered=False) for card in cards[:limit])
 
 
 def clamp_targets(raw: Any, deck_size: int) -> dict[str, int]:

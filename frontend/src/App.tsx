@@ -59,6 +59,8 @@ function toCompactDecklistPayload(cards: MagicCard[]): MagicCard[] {
     name: card.name,
     count: card.count,
     category: card.category,
+    // Lets the server check a budget without looking every price up again.
+    price: card.price,
   }));
 }
 

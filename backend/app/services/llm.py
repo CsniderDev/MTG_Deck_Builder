@@ -18,6 +18,7 @@ from typing import Any, Iterable, Optional
 
 import httpx
 from ..config import get_settings
+from .budget import budget_instructions, parse_budget
 from .llm_providers import LLMEmptyResponseError, LLMProvider, create_provider
 
 logger = logging.getLogger(__name__)
@@ -126,7 +127,9 @@ def _gamechanger_block(
     )
 
 
-def _compact_decklist_for_prompt(previous_decklist: list[dict[str, Any]]) -> list[dict[str, Any]]:
+def _compact_decklist_for_prompt(
+    previous_decklist: list[dict[str, Any]], include_prices: bool = False
+) -> list[dict[str, Any]]:
     """Reduce a hydrated decklist to the minimal fields the LLM needs for revisions."""
     compact_cards: list[dict[str, Any]] = []
     for card in previous_decklist:
@@ -142,6 +145,8 @@ def _compact_decklist_for_prompt(previous_decklist: list[dict[str, Any]]) -> lis
         category = card.get("category")
         if category:
             compact_card["category"] = str(category)
+        if include_prices and card.get("price"):
+            compact_card["usd"] = str(card.get("price"))
         compact_cards.append(compact_card)
     return compact_cards
 
@@ -169,24 +174,8 @@ def _classify_llm_error(exc: Exception) -> str:
 
 
 def _budget_block(user_prompt: Optional[str]) -> str:
-    """Spell out a budget the user mentioned, so both build steps respect it."""
-    if not user_prompt:
-        return ""
-    explicit = re.search(
-        r"(?:budget|max|limit|under|cost|price)\s*\$?\s*(\d+(?:\.\d{2})?)|\$(\d+(?:\.\d{2})?)\s*(?:dollars|bucks|usd)",
-        user_prompt,
-        re.IGNORECASE,
-    )
-    if explicit:
-        amount = explicit.group(1) or explicit.group(2)
-        return f"The total deck budget must be at or under ${amount} (card prices are shown in USD).\n"
-    loose = re.search(r"\$(\d+(?:\.\d{2})?)", user_prompt)
-    if loose:
-        return (
-            f"The user mentioned ${loose.group(1)}; if that is a budget, keep the deck at or under it "
-            "(card prices are shown in USD).\n"
-        )
-    return ""
+    """Budget instructions for a budget stated in free text (empty when none)."""
+    return budget_instructions(parse_budget(user_prompt))
 
 
 class LLMService:
@@ -321,14 +310,21 @@ class LLMService:
         bracket_description: str,
         user_prompt: str,
         gamechanger_limit: Optional[int] = None,
+        budget: Optional[float] = None,
     ) -> Optional[dict[str, Any]]:
-        """Step 1 of a build: strategy, role counts, and Scryfall theme searches."""
+        """Step 1 of a build: strategy, role counts, and Scryfall theme searches.
+
+        A user concept is a hard requirement: the theme searches implement it, and the
+        commander's other popular archetypes are listed as ``avoid_queries`` so the pool
+        doesn't drift back to the commander's default build.
+        """
         if self._provider is None:
             return None
         ci = "".join(commander.get("color_identity") or []) or "C"
         gc_rule = (
             "unlimited" if gamechanger_limit is None else f"at most {gamechanger_limit}"
         )
+        concept = (user_prompt or "").strip()
         prompt = (
             "You are an expert Magic: The Gathering Commander deck builder planning a deck.\n\n"
             f"Commander: {commander.get('name')}\n"
@@ -336,24 +332,42 @@ class LLMService:
             f"Color identity: {ci}\n"
             f"Oracle text: {commander.get('oracle_text') or '(none)'}\n\n"
             f"Bracket {bracket}: {bracket_description} Game-changers allowed: {gc_rule}.\n"
-            f"{_budget_block(user_prompt)}"
-            f"User's deck concept (PRIMARY DIRECTION): {user_prompt or '(none - use the commanders strengths)'}\n\n"
-            "Plan the deck. Respond ONLY with a JSON object:\n"
+            f"{budget_instructions(budget)}"
+            + (
+                f"USER'S DECK CONCEPT (a hard requirement, not a suggestion): {concept}\n\n"
+                if concept
+                else "No concept given - build around the commander's strengths.\n\n"
+            )
+            + "Plan the deck. Respond ONLY with a JSON object:\n"
             "{\n"
-            '  "strategy": "<2-3 sentences: game plan and how it wins>",\n'
+            '  "strategy": "<2-3 sentences: the user\'s concept as the game plan, and how it wins>",\n'
             '  "targets": {"lands": <35-40>, "ramp": <int>, "draw": <int>, "removal": <int>, "wipe": <int>},\n'
-            '  "theme_queries": ["<Scryfall search query>", "..."]\n'
+            '  "theme_queries": ["<Scryfall search query>", "..."],\n'
+            '  "avoid_queries": ["<Scryfall search query for an off-concept theme>", "..."]\n'
             "}\n"
             "Rules:\n"
+            "- The concept decides what the deck is. If it names a specific or niche plan (e.g. "
+            "\"only clones and copies of the commander\", \"strictly enchantments\"), build THAT "
+            "plan and nothing else - even if the commander is usually built another way. Use "
+            "the commander's other abilities only where they directly help the concept.\n"
+            "- strategy: restate the concept faithfully. Do not add themes the user didn't ask "
+            "for (tribal types, counters, tokens...) unless they are needed to make the concept work.\n"
             "- targets are card counts for a 99-card deck; cards for the theme fill the rest. "
             "Lands: at least 35 (35-38 typical). Typical: 8-12 ramp, 8-12 draw, 6-10 removal/interaction, 1-4 board wipes. "
             "Adjust for the bracket, curve and concept.\n"
-            "- theme_queries: 2-4 Scryfall search queries that find cards for THIS deck's theme "
-            "and the commander's mechanics, using Scryfall syntax such as o:\"text\" (rules text), "
-            "t:type, kw:keyword, otag:tag, cmc<=3, pow>=4. Examples: o:proliferate, "
-            "o:\"+1/+1 counter\" t:creature, t:goblin, kw:flying t:creature cmc<=3, "
-            "otag:sacrifice-outlet. Do NOT add color, format, legality or ordering filters - "
-            "the server adds those. Keep each query short and specific.\n"
+            "- theme_queries: 2-4 Scryfall search queries, EACH of which finds cards that directly "
+            "carry out the concept (or, with no concept, the commander's main plan), using "
+            "Scryfall syntax such as o:\"text\" (rules text), t:type, kw:keyword, otag:tag, "
+            "cmc<=3, pow>=4. Examples: o:proliferate, o:\"+1/+1 counter\" t:creature, t:goblin, "
+            "otag:clone, o:\"token that's a copy\", otag:sacrifice-outlet. Never add a query for a "
+            "theme the concept doesn't call for.\n"
+            "- avoid_queries: 0-3 Scryfall queries for the themes this commander is commonly "
+            "built around that the user's concept does NOT ask for (e.g. for a clone-focused "
+            "deck of a commander that cares about Gods: t:god). Cards they find are removed "
+            "from the candidate pool unless a concept search also finds them. Leave it empty "
+            "when there is no concept or the concept is the commander's usual plan.\n"
+            "- Do NOT add color, format, legality or ordering filters to any query - the server "
+            "adds those. Keep each query short and specific.\n"
         )
         return await self._generate_json(prompt)
 
@@ -368,6 +382,7 @@ class LLMService:
         pool_text: str,
         deck_size: int,
         gamechanger_limit: Optional[int] = None,
+        budget: Optional[float] = None,
     ) -> Optional[dict[str, Any]]:
         """Step 2 of a build: choose cards from the numbered candidate pool."""
         if self._provider is None:
@@ -385,8 +400,8 @@ class LLMService:
             f"Commander: {commander.get('name')} (color identity {ci})\n"
             f"Oracle text: {commander.get('oracle_text') or '(none)'}\n"
             f"Bracket {bracket}: {bracket_description}\n"
-            f"{_budget_block(user_prompt)}"
-            f"User's deck concept (PRIMARY DIRECTION): {user_prompt or '(none)'}\n"
+            f"{budget_instructions(budget)}"
+            f"USER'S DECK CONCEPT (a hard requirement): {user_prompt or '(none)'}\n"
             f"Plan: {plan.get('strategy') or '(none)'}\n"
             f"Targets: {nonland} nonland cards - including about {targets['ramp']} ramp, "
             f"{targets['draw']} card draw, {targets['removal']} removal/interaction, "
@@ -410,6 +425,12 @@ class LLMService:
             f"{nonland} nonland cards), each list MOST IMPORTANT FIRST, using pool numbers "
             "(e.g. 12, not \"#12\" or a name). A card goes in only one group. \"theme\" holds "
             "the creatures, synergy pieces and win conditions that make this deck what it is.\n"
+            "- Follow the user's concept strictly. Every \"theme\" pick must directly carry out "
+            "the concept - take them from the Theme section and [on-theme] cards first. Never "
+            "fill theme slots with the commander's other popular archetypes (other tribes, "
+            "counters, tokens...) that the concept didn't ask for; a Synergy-section card only "
+            "belongs if it serves the concept. Where a role card (ramp, draw, removal) that "
+            "also fits the concept exists, prefer it over a generic one.\n"
             "- Basic lands are added automatically - do not pick them - and the server balances "
             "their colors.\n"
             "- Only pick numbers from the pool. Every card in it is verified Commander-legal and "
@@ -418,14 +439,22 @@ class LLMService:
             "- Choose the best card for each job regardless of popularity. Cards tagged [new] are "
             "recent releases and [gem] are theme cards few people play - judge them by their "
             "rules text. The user wants decks that explore beyond the usual staples: include at "
-            "least 6 cards tagged [new] or [gem] that genuinely fit the plan (more if they are as "
-            "good as the staples), but never at the cost of the deck's core ramp, draw and "
-            "interaction.\n"
+            "least 6 cards tagged [new] or [gem] that genuinely fit the concept (more if they are "
+            "as good as the staples), but never at the cost of the deck's core ramp, draw and "
+            "interaction, and never an off-concept card just to reach the count.\n"
             "- Nonbasic lands: pick enough color fixing for the deck's colors (more for 3+ colors), "
             "weighting colors by how many mana symbols the spells need, plus a few utility lands "
             f"that fit the plan - leaving room for basics within the {targets['lands']} lands.\n"
-            "- Keep a sensible mana curve for the bracket.\n\n"
-            "Candidate pool (#number name cost | type [tags] :: rules text for less-known cards):\n"
+            "- Keep a sensible mana curve for the bracket.\n"
+            + (
+                "- Stay within the HARD BUDGET above: add up the prices of your picks (basics cost "
+                "about $0.30 each) and leave a margin. Do not state a total in your notes - the "
+                "server reports the real one.\n"
+                if budget is not None
+                else ""
+            )
+            + "\n"
+            "Candidate pool (#number name cost | type [$price] [tags] :: rules text for less-known cards):\n"
             f"{pool_text}\n"
         )
         return await self._generate_json(prompt)
@@ -443,6 +472,9 @@ class LLMService:
         banned_list: Optional[Iterable[str]] = None,
         plan_strategy: str = "",
         theme_candidates: str = "",
+        budget: Optional[float] = None,
+        current_total: Optional[float] = None,
+        avoid_queries: Optional[Iterable[str]] = None,
     ) -> Optional[dict[str, Any]]:
         """Ask the LLM to revise an existing decklist and explain each substitution.
 
@@ -452,7 +484,16 @@ class LLMService:
         if self._provider is None:
             return None
         gc_block = _gamechanger_block(gamechanger_limit, gamechangers)
-        compact_previous_decklist = _compact_decklist_for_prompt(previous_decklist)
+        compact_previous_decklist = _compact_decklist_for_prompt(
+            previous_decklist, include_prices=budget is not None
+        )
+        avoid = [q for q in (avoid_queries or []) if q]
+        avoid_line = (
+            "Off-concept themes - do NOT add cards whose main purpose is any of these (Scryfall "
+            f"searches): {'; '.join(avoid)}\n"
+            if avoid
+            else ""
+        )
         plan_line = plan_strategy.strip() or (
             "(not recorded - work it out from the commander, the original concept and the "
             "current list, then keep to it)"
@@ -472,7 +513,9 @@ class LLMService:
             f"(color identity: {''.join(commander.get('color_identity') or []) or 'C'}).\n"
             f"Bracket {bracket} - {bracket_description}\n"
             f"CORE GAME PLAN (keep it unless the change request explicitly asks to change it): {plan_line}\n"
-            f"Original user concept: {user_prompt or '(none)'}\n"
+            f"Original user concept (a hard requirement): {user_prompt or '(none)'}\n"
+            f"{avoid_line}"
+            f"{budget_instructions(budget, current_total)}"
             f"User change request: {change_request}\n\n"
             "How to revise:\n"
             "- Apply the change request IN SERVICE OF the core game plan. Every card you add "
@@ -482,6 +525,8 @@ class LLMService:
             "on-plan cards first. Never swap theme pieces or synergy cards for generic staples "
             "unless the request asks for that.\n"
             "- Change only what the request needs; keep everything else.\n"
+            "- Never add cards for a theme the concept didn't ask for (other tribes, counters, "
+            "tokens...) just because the commander is popular with it.\n"
             "- Every card in a substitution's \"removed\" list MUST be copied exactly from the "
             "current decklist below - never remove a card the deck doesn't have. Each swap "
             "removes as many cards as it adds, so the deck stays the same size. List EVERY "
@@ -505,7 +550,8 @@ class LLMService:
             '  "plan": {"changed": <true only if the change request explicitly changed the game '
             'plan>, "strategy": "<the deck\'s core game plan after this revision, 1-3 '
             'sentences>", "theme_queries": ["<only when changed: 2-4 Scryfall queries for the '
-            'new theme, e.g. o:proliferate>"]}'
+            'new theme, e.g. o:proliferate>"], "avoid_queries": ["<only when changed: 0-3 '
+            'Scryfall queries for themes the new plan rules out>"]}'
         )
         return await self._generate_json(prompt)
 

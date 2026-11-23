@@ -176,6 +176,11 @@ export default function DeckResult({
               <strong>Game plan:</strong> {deck.plan.strategy}
             </p>
           )}
+          {deck.plan?.budget != null && (
+            <p className="deck-plan">
+              <strong>Budget:</strong> ${deck.plan.budget.toFixed(2)} cap on the 99 (kept on every revision)
+            </p>
+          )}
           <h3>Explanation</h3>
           {deck.explanation.split(/\n+/).map((paragraph, idx) => (
             <p key={idx}>{paragraph}</p>

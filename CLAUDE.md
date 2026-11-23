@@ -170,6 +170,22 @@ ask the LLM to redo anything, so it can drift from what the server would produce
 Without a concept the same pool is assembled with default targets (`source="heuristic"`).
 If the plan has no usable theme queries, `fallback_theme_queries` derives them from the concept text.
 
+**Concepts are hard requirements.** The plan prompt makes every theme query implement the user's
+concept and returns `avoid_queries` - searches for the commander's usual archetypes the concept rules
+out (e.g. `t:god` for a clone deck). `build_card_pool` drops cards those searches find unless a theme
+or role search also found them. The selection prompt labels pool sections (Theme = concept searches,
+Synergy = generally popular with the commander) and tags `[on-theme]` role cards.
+
+**Budgets are enforced in code** (`services/budget.py`). `parse_budget` reads a cap from the concept
+("around the 100 dollar budget range" -> 100), or from a change request ("get it under $75"; "ignore
+the budget" lifts it); it is stored on `DeckPlan.budget` and kept across revisions. The cap covers the
+99 only (commanders excluded), matching the UI's "Total price". Builds drop pool cards above 10% of the
+budget and show prices; after assembly `enforce_budget` swaps the priciest cards for cheaper ones that
+share a role (on-theme first; lands fall back to basics). Revamps send the current total and headroom,
+then `_revert_costly_swaps` replaces an over-budget addition with a cheaper same-role card (or undoes the
+swap), and remaining overage is fixed by `enforce_budget`, shown as "Budget:" swaps. LLM notes that
+state budget totals are dropped; the server reports the real total.
+
 **Plans persist across revisions.** Builds return `DeckResponse.plan` (`DeckPlan`: strategy + theme
 queries); the frontend sends it back as `RevampDeckRequest.plan`. Revamp puts the plan first in the
 prompt, re-runs its theme queries to offer on-theme candidates (`render_theme_candidates`), and keeps

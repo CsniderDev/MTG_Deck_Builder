@@ -70,6 +70,10 @@ class DeckPlan(BaseModel):
 
     strategy: str = Field(default="", max_length=2000)
     theme_queries: list[str] = Field(default_factory=list, max_length=4)
+    # Hard cap on the 99's total price (USD), read from the concept or a change request.
+    budget: Optional[float] = Field(default=None, ge=0, le=100000)
+    # Scryfall searches for themes the concept rules out (kept out of candidate pools).
+    avoid_queries: list[str] = Field(default_factory=list, max_length=4)
 
 
 class RevampDeckRequest(BaseModel):

@@ -10,7 +10,7 @@
   Revamps are not adjusted. Possible follow-up: make the range depend on bracket / average CMC.
 - ~~Use all legal cards (new and unpopular)~~ done: builds pick from a validated pool built from
   EDHREC + Scryfall role/theme/newest searches (see CLAUDE.md "Deck building pipeline").
-  Follow-ups: apply the pool approach to revamps; enforce budgets in code using pool prices;
+  Follow-ups: apply the pool approach to revamps;
   load Scryfall bulk data locally to cut request time further.
 - If a revamp is done, persist the previous decklist and dont default to the heuristic build
 - ~~Add security measures in place to ensure malicious users dont overload APIs or spam requests to the LLM~~ done:
